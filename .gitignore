@@ -1,0 +1,6 @@
+state/
+worktrees/
+node_modules/
+*.env
+.hive-tokens
+bun.lock

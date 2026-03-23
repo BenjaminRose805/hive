@@ -1,0 +1,27 @@
+Bot filter patch for Discord MCP server.ts
+
+Target: /home/benjamin/.claude/plugins/cache/claude-plugins-official/discord/0.0.1/server.ts
+
+This patch replaces the simple `if (msg.author.bot) return` guard with one that
+consults loadAccess() so that bots explicitly listed in allowFrom (globally or
+per-group) are permitted through. All other bots are still rejected.
+
+Original (lines ~668-671):
+  client.on('messageCreate', msg => {
+    if (msg.author.bot) return
+    handleInbound(msg).catch(e => process.stderr.write(`discord: handleInbound failed: ${e}\n`))
+  })
+
+Replacement:
+  client.on('messageCreate', msg => {
+    if (msg.author.bot) {
+      const access = loadAccess()
+      const isAllowedBot =
+        access.allowFrom.includes(msg.author.id) ||
+        Object.values(access.groups).some(g => (g.allowFrom ?? []).includes(msg.author.id))
+      if (!isAllowedBot) return
+    }
+    handleInbound(msg).catch(e => process.stderr.write(`discord: handleInbound failed: ${e}\n`))
+  })
+
+Applied by: patches/apply-patch.sh

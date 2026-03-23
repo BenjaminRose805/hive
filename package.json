@@ -1,0 +1,12 @@
+{
+  "name": "hive",
+  "version": "0.1.0",
+  "description": "Discord multi-session Claude Code orchestrator",
+  "type": "module",
+  "scripts": {
+    "gen-config": "bun run bin/hive-gen-config.ts"
+  },
+  "dependencies": {
+    "discord.js": "^14.14.0"
+  }
+}
