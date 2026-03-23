@@ -18,6 +18,10 @@ WORKER_BOT_IDS=""
 PROJECT_REPO=""
 TEARDOWN=false
 CLEAN=false
+SINGLE_BOT=false
+TOKEN=""
+BOT_ID=""
+GATEWAY_PID=""
 
 # ---------------------------------------------------------------------------
 # Usage
@@ -36,9 +40,12 @@ OPTIONS
   --workers N           Number of workers (default: 3)
   --budget N            USD budget per worker (default: 5)
   --manager-budget N    USD budget for manager (default: 10)
-  --tokens-file PATH    File with bot tokens, 1 per line, manager first (required)
-  --manager-bot-id ID   Manager's Discord bot user ID (required)
-  --worker-bot-ids IDS  Comma-separated worker bot user IDs (required)
+  --tokens-file PATH    File with bot tokens, 1 per line, manager first (required in multi-bot mode)
+  --manager-bot-id ID   Manager's Discord bot user ID (required in multi-bot mode)
+  --worker-bot-ids IDS  Comma-separated worker bot user IDs (required in multi-bot mode)
+  --single-bot          Enable single-bot gateway mode (uses one Discord bot for all sessions)
+  --token STRING        Single bot token (required with --single-bot)
+  --bot-id ID           Single bot user ID (required with --single-bot)
   --teardown            Stop all running hive sessions
   --clean               With --teardown: also remove worktrees
   --help                Show this help
@@ -51,6 +58,14 @@ EXAMPLES
     --manager-bot-id 111111111111 \
     --worker-bot-ids 222222222222,333333333333,444444444444 \
     --tokens-file ./tokens.txt
+
+  # Single-bot mode (recommended — uses one Discord bot for all sessions)
+  hive-launch.sh --single-bot \
+    --project-repo ~/my-project \
+    --channel-id 1234567890 \
+    --token "MTIz..." \
+    --bot-id 111111111111 \
+    --workers 3
 
   # Tear down all running sessions
   hive-launch.sh --teardown
@@ -84,6 +99,9 @@ parse_args() {
       --tokens-file)     TOKENS_FILE="$2"; shift 2 ;;
       --manager-bot-id)  MANAGER_BOT_ID="$2"; shift 2 ;;
       --worker-bot-ids)  WORKER_BOT_IDS="$2"; shift 2 ;;
+      --single-bot)      SINGLE_BOT=true; shift ;;
+      --token)           TOKEN="$2"; shift 2 ;;
+      --bot-id)          BOT_ID="$2"; shift 2 ;;
       --teardown)        TEARDOWN=true; shift ;;
       --clean)           CLEAN=true; shift ;;
       *)                 die "Unknown argument: $1. Run with --help for usage." ;;
@@ -113,6 +131,14 @@ do_teardown() {
     kill "$watchdog_pid" 2>/dev/null || true
   fi
 
+  # Kill gateway (before workers, so workers can attempt deregistration)
+  local gateway_pid
+  gateway_pid="$(jq -r '.gateway.pid // empty' "$pids_file" 2>/dev/null || true)"
+  if [[ -n "$gateway_pid" ]] && kill -0 "$gateway_pid" 2>/dev/null; then
+    log "Stopping gateway (PID $gateway_pid) ..."
+    kill "$gateway_pid" 2>/dev/null || true
+  fi
+
   # Kill manager
   local manager_pid
   manager_pid="$(jq -r '.manager.pid // empty' "$pids_file" 2>/dev/null || true)"
@@ -134,7 +160,7 @@ do_teardown() {
   # Brief wait, then SIGKILL survivors
   sleep 2
 
-  for pid in $watchdog_pid $manager_pid $worker_pids; do
+  for pid in ${watchdog_pid:-} ${gateway_pid:-} ${manager_pid:-} $worker_pids; do
     if [[ -n "${pid:-}" ]] && kill -0 "$pid" 2>/dev/null; then
       warn "Process $pid did not exit gracefully — sending SIGKILL"
       kill -9 "$pid" 2>/dev/null || true
@@ -145,6 +171,12 @@ do_teardown() {
   if [[ "$CLEAN" == true ]] && [[ -d "$HIVE_DIR/worktrees" ]]; then
     log "Removing worktrees ..."
     rm -rf "$HIVE_DIR/worktrees"
+  fi
+
+  # Clean up gateway socket directory
+  if [[ -d "/tmp/hive-gateway" ]]; then
+    log "Removing gateway socket directory ..."
+    rm -rf "/tmp/hive-gateway"
   fi
 
   # Clear pids file
@@ -166,12 +198,37 @@ validate_prerequisites() {
     fi
   done
 
-  # Required arguments
-  [[ -n "$PROJECT_REPO" ]]   || die "--project-repo is required"
-  [[ -n "$CHANNEL_ID" ]]     || die "--channel-id is required"
-  [[ -n "$MANAGER_BOT_ID" ]] || die "--manager-bot-id is required"
-  [[ -n "$WORKER_BOT_IDS" ]] || die "--worker-bot-ids is required"
-  [[ -n "$TOKENS_FILE" ]]    || die "--tokens-file is required"
+  # Required arguments (common to both modes)
+  [[ -n "$PROJECT_REPO" ]] || die "--project-repo is required"
+  [[ -n "$CHANNEL_ID" ]]   || die "--channel-id is required"
+
+  if [[ "$SINGLE_BOT" == true ]]; then
+    # Single-bot mode requirements
+    [[ -n "$TOKEN" ]]  || die "--token is required in --single-bot mode"
+    [[ -n "$BOT_ID" ]] || die "--bot-id is required in --single-bot mode"
+  else
+    # Multi-bot mode requirements (existing validation)
+    [[ -n "$MANAGER_BOT_ID" ]] || die "--manager-bot-id is required"
+    [[ -n "$WORKER_BOT_IDS" ]] || die "--worker-bot-ids is required"
+    [[ -n "$TOKENS_FILE" ]]    || die "--tokens-file is required"
+
+    # Tokens file
+    [[ -f "$TOKENS_FILE" ]] || die "Tokens file not found: $TOKENS_FILE"
+
+    local expected_lines=$(( WORKERS + 1 ))
+    local actual_lines
+    actual_lines="$(grep -c '.' "$TOKENS_FILE" || true)"
+    if [[ "$actual_lines" -ne "$expected_lines" ]]; then
+      die "Tokens file has $actual_lines non-empty lines, expected $expected_lines (1 manager + $WORKERS workers)"
+    fi
+
+    # Validate worker-bot-ids count
+    local id_count
+    id_count="$(echo "$WORKER_BOT_IDS" | tr ',' '\n' | grep -c '.' || true)"
+    if [[ "$id_count" -ne "$WORKERS" ]]; then
+      die "--worker-bot-ids has $id_count IDs but --workers is $WORKERS. They must match."
+    fi
+  fi
 
   # Repo validation
   [[ -d "$PROJECT_REPO" ]] || die "Project repo not found: $PROJECT_REPO"
@@ -179,23 +236,6 @@ validate_prerequisites() {
     || die "$PROJECT_REPO is not a git repository"
   git -C "$PROJECT_REPO" rev-parse HEAD &>/dev/null \
     || die "$PROJECT_REPO has no commits"
-
-  # Tokens file
-  [[ -f "$TOKENS_FILE" ]] || die "Tokens file not found: $TOKENS_FILE"
-
-  local expected_lines=$(( WORKERS + 1 ))
-  local actual_lines
-  actual_lines="$(grep -c '.' "$TOKENS_FILE" || true)"
-  if [[ "$actual_lines" -ne "$expected_lines" ]]; then
-    die "Tokens file has $actual_lines non-empty lines, expected $expected_lines (1 manager + $WORKERS workers)"
-  fi
-
-  # Validate worker-bot-ids count
-  local id_count
-  id_count="$(echo "$WORKER_BOT_IDS" | tr ',' '\n' | grep -c '.' || true)"
-  if [[ "$id_count" -ne "$WORKERS" ]]; then
-    die "--worker-bot-ids has $id_count IDs but --workers is $WORKERS. They must match."
-  fi
 
   # RAM check (warn if < 2GB headroom per worker)
   if command -v free &>/dev/null; then
@@ -221,14 +261,26 @@ generate_configs() {
   fi
 
   log "Generating configuration files ..."
-  bun run "$HIVE_DIR/bin/hive-gen-config.ts" \
-    --workers "$WORKERS" \
-    --channel-id "$CHANNEL_ID" \
-    --manager-bot-id "$MANAGER_BOT_ID" \
-    --worker-bot-ids "$WORKER_BOT_IDS" \
-    --tokens-file "$TOKENS_FILE" \
-    --project-repo "$PROJECT_REPO" \
-    --budget "$BUDGET"
+
+  if [[ "$SINGLE_BOT" == true ]]; then
+    bun run "$HIVE_DIR/bin/hive-gen-config.ts" \
+      --workers "$WORKERS" \
+      --channel-id "$CHANNEL_ID" \
+      --project-repo "$PROJECT_REPO" \
+      --budget "$BUDGET" \
+      --single-bot \
+      --token "$TOKEN" \
+      --bot-id "$BOT_ID"
+  else
+    bun run "$HIVE_DIR/bin/hive-gen-config.ts" \
+      --workers "$WORKERS" \
+      --channel-id "$CHANNEL_ID" \
+      --manager-bot-id "$MANAGER_BOT_ID" \
+      --worker-bot-ids "$WORKER_BOT_IDS" \
+      --tokens-file "$TOKENS_FILE" \
+      --project-repo "$PROJECT_REPO" \
+      --budget "$BUDGET"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -246,10 +298,50 @@ apply_patch() {
 }
 
 # ---------------------------------------------------------------------------
+# Gateway lifecycle (single-bot mode only)
+# ---------------------------------------------------------------------------
+
+launch_gateway() {
+  echo "Starting gateway..."
+  DISCORD_BOT_TOKEN="$TOKEN" bun run "$HIVE_DIR/bin/hive-gateway.ts" &
+  local gateway_pid=$!
+
+  # Wait for health endpoint (up to 30s)
+  local attempts=0
+  while [ $attempts -lt 30 ]; do
+    # Try to reach health endpoint via Unix socket
+    if curl -s --unix-socket /tmp/hive-gateway/gateway.sock http://localhost/health > /dev/null 2>&1; then
+      local bot_tag
+      bot_tag=$(curl -s --unix-socket /tmp/hive-gateway/gateway.sock http://localhost/health | grep -o '"connectedAs":"[^"]*"' | cut -d'"' -f4)
+      echo "  Gateway started (PID: $gateway_pid), connected as $bot_tag"
+      GATEWAY_PID=$gateway_pid
+      return 0
+    fi
+    sleep 1
+    attempts=$((attempts + 1))
+
+    # Check if process died
+    if ! kill -0 $gateway_pid 2>/dev/null; then
+      echo "ERROR: Gateway process died during startup"
+      return 1
+    fi
+  done
+
+  echo "ERROR: Gateway health check timed out after 30s"
+  kill $gateway_pid 2>/dev/null
+  return 1
+}
+
+# ---------------------------------------------------------------------------
 # Launch sessions
 # ---------------------------------------------------------------------------
 
 launch_hive() {
+  # In single-bot mode, start the gateway first
+  if [[ "$SINGLE_BOT" == true ]]; then
+    launch_gateway || die "Gateway failed to start. Aborting."
+  fi
+
   local manager_prompt
   manager_prompt="$(cat "$HIVE_DIR/config/manager-system-prompt.md")"
 
@@ -307,14 +399,30 @@ launch_hive() {
   manager_started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
   local pids_json
-  pids_json=$(jq -n \
-    --arg mpid "$manager_pid" \
-    --arg mstarted "$manager_started" \
-    '{
-      manager: { pid: ($mpid | tonumber), name: "hive-manager", started: $mstarted },
-      workers: [],
-      watchdog: { pid: null, started: null }
-    }')
+  if [[ "$SINGLE_BOT" == true ]] && [[ -n "$GATEWAY_PID" ]]; then
+    local gateway_started
+    gateway_started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    pids_json=$(jq -n \
+      --arg gpid "$GATEWAY_PID" \
+      --arg gstarted "$gateway_started" \
+      --arg mpid "$manager_pid" \
+      --arg mstarted "$manager_started" \
+      '{
+        gateway: { pid: ($gpid | tonumber), started: $gstarted },
+        manager: { pid: ($mpid | tonumber), name: "hive-manager", started: $mstarted },
+        workers: [],
+        watchdog: { pid: null, started: null }
+      }')
+  else
+    pids_json=$(jq -n \
+      --arg mpid "$manager_pid" \
+      --arg mstarted "$manager_started" \
+      '{
+        manager: { pid: ($mpid | tonumber), name: "hive-manager", started: $mstarted },
+        workers: [],
+        watchdog: { pid: null, started: null }
+      }')
+  fi
 
   for i in $(seq 0 $(( ${#worker_pids[@]} - 1 ))); do
     local wid
@@ -332,8 +440,13 @@ launch_hive() {
   # Start PID watchdog
   # -------------------------------------------------------------------------
 
-  local manager_token
-  manager_token="$(head -1 "$TOKENS_FILE")"
+  # Determine the notification token based on mode
+  local notify_token
+  if [[ "$SINGLE_BOT" == true ]]; then
+    notify_token="$TOKEN"
+  else
+    notify_token="$(head -1 "$TOKENS_FILE")"
+  fi
 
   (
     while true; do
@@ -347,7 +460,7 @@ launch_hive() {
           if [[ -n "$wpid" ]] && [[ "$wpid" != "null" ]] && ! kill -0 "$wpid" 2>/dev/null; then
             # Worker died — notify Discord
             curl -s -X POST "https://discord.com/api/v10/channels/$CHANNEL_ID/messages" \
-              -H "Authorization: Bot $manager_token" \
+              -H "Authorization: Bot $notify_token" \
               -H "Content-Type: application/json" \
               -d "{\"content\": \"WATCHDOG | worker-$wid process (PID $wpid) has died. Task may need reassignment.\"}" > /dev/null 2>&1 || true
             # Remove from tracking
@@ -365,6 +478,22 @@ launch_hive() {
           jq '.manager.pid = null' "$HIVE_DIR/state/pids.json" \
             > "$HIVE_DIR/state/pids.json.tmp" 2>/dev/null \
             && mv "$HIVE_DIR/state/pids.json.tmp" "$HIVE_DIR/state/pids.json"
+        fi
+
+        # Check gateway (single-bot mode only) — auto-restart on death
+        if [[ "$SINGLE_BOT" == true ]]; then
+          local cur_gpid
+          cur_gpid="$(jq -r '.gateway.pid // empty' "$HIVE_DIR/state/pids.json" 2>/dev/null || true)"
+          if [[ -n "$cur_gpid" ]] && [[ "$cur_gpid" != "null" ]] && ! kill -0 "$cur_gpid" 2>/dev/null; then
+            echo "[hive-watchdog] WARNING: Gateway process (PID $cur_gpid) has died — restarting..."
+            DISCORD_BOT_TOKEN="$TOKEN" bun run "$HIVE_DIR/bin/hive-gateway.ts" &
+            local new_gpid=$!
+            jq --arg gpid "$new_gpid" \
+              '.gateway.pid = ($gpid | tonumber)' "$HIVE_DIR/state/pids.json" \
+              > "$HIVE_DIR/state/pids.json.tmp" 2>/dev/null \
+              && mv "$HIVE_DIR/state/pids.json.tmp" "$HIVE_DIR/state/pids.json"
+            echo "[hive-watchdog] Gateway restarted (PID $new_gpid)"
+          fi
         fi
       fi
     done
@@ -387,6 +516,9 @@ launch_hive() {
 
   echo ""
   echo "=== Hive Launched Successfully ==="
+  if [[ "$SINGLE_BOT" == true ]]; then
+    echo "  Gateway:  PID $GATEWAY_PID"
+  fi
   echo "  Manager:  PID $manager_pid"
   echo "  Workers:  $WORKERS (PIDs: $worker_pid_list)"
   echo "  Watchdog: PID $watchdog_pid"
@@ -414,8 +546,14 @@ main() {
   fi
 
   validate_prerequisites
+
   generate_configs
-  apply_patch
+
+  # Apply bot filter patch only in multi-bot mode
+  if [[ "$SINGLE_BOT" == false ]]; then
+    apply_patch
+  fi
+
   launch_hive
 }
 
