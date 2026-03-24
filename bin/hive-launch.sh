@@ -561,6 +561,7 @@ launch_hive() {
 claude --name "hive-manager" \
   --append-system-prompt "\$(cat "$HIVE_DIR/config/manager-system-prompt.md")" \
   --mcp-config "$HIVE_DIR/state/manager/mcp-config.json" \
+  --max-cost-usd $MANAGER_BUDGET \
   --permission-mode bypassPermissions
 LAUNCH_EOF
     chmod +x "$launch_script"
@@ -585,6 +586,7 @@ LAUNCH_EOF
     claude --name "hive-manager" \
       --append-system-prompt "$manager_prompt" \
       --mcp-config "$HIVE_DIR/state/manager/mcp-config.json" \
+      --max-cost-usd "$MANAGER_BUDGET" \
       --permission-mode bypassPermissions &
     local manager_pid=$!
     log "  Manager started (PID: $manager_pid)"
@@ -625,6 +627,7 @@ LAUNCH_EOF
         echo ')" \'
         echo "  --mcp-config \"$HIVE_DIR/state/workers/$agent_name/mcp-config.json\" \\"
         echo '  --strict-mcp-config \'
+        echo "  --max-cost-usd $BUDGET \\"
         echo '  --permission-mode bypassPermissions'
       } > "$worker_launch_script"
       chmod +x "$worker_launch_script"
@@ -652,6 +655,7 @@ LAUNCH_EOF
         --append-system-prompt "$composed_prompt" \
         --mcp-config "$HIVE_DIR/state/workers/$agent_name/mcp-config.json" \
         --strict-mcp-config \
+        --max-cost-usd "$BUDGET" \
         --permission-mode bypassPermissions) &
       worker_pids+=($!)
       started_times+=("$(date -u +%Y-%m-%dT%H:%M:%SZ)")

@@ -464,13 +464,13 @@ async function handleSlashAssign(interaction: ChatInputCommandInteraction): Prom
 
   await interaction.deferReply()
 
-  // Format as TASK_ASSIGN protocol message
+  // Format as TASK_ASSIGN protocol message (pipe-delimited per config/protocol.md)
+  const taskId = `task-${Date.now().toString(36)}`
   const taskMessage = [
-    `TYPE: TASK_ASSIGN`,
-    `FROM: manager`,
-    `TO: ${agentName}`,
-    `TASK: ${task}`,
-    `TS: ${new Date().toISOString()}`,
+    `TASK_ASSIGN | ${agentName} | ${taskId}`,
+    `Branch: hive/${agentName}`,
+    `Description: ${task}`,
+    `Dependencies: none`,
   ].join('\n')
 
   const payload = {

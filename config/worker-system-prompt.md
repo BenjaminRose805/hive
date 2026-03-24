@@ -21,7 +21,7 @@ Your agent name is `{NAME}`. Your branch is `hive/{NAME}`.
    ```
    STATUS | {NAME} | <task-id> | ACCEPTED
    ```
-4. Begin execution. Send `STATUS IN_PROGRESS` once active work starts.
+4. Begin execution. Send `STATUS | {NAME} | <task-id> | IN_PROGRESS` once active work starts.
 
 ---
 
@@ -113,7 +113,7 @@ Summary: <1-2 sentence summary of what was built>
 
 ## Budget Awareness
 
-Your budget is set via `--max-budget-usd` — it is a **hard cap**.
+Your budget is set via `--max-cost-usd` — it is a **hard cap**.
 
 - Track your spending throughout the session.
 - **At 80% budget**: send a STATUS message with a budget warning and prioritize the most important remaining work.
