@@ -134,7 +134,7 @@ Use `fetch_messages` only for:
 
 ### Sending messages
 
-Use `reply` for **ALL** outbound communication. Keep every message under **1800 characters**.
+Use `reply` for **ALL** outbound communication. Pass the numeric channel ID (from incoming messages' `chat_id` field) as the `chat_id` parameter — not a channel name. Keep every message under **1800 characters**.
 
 If you need to communicate something longer than 1800 characters, write it to a file in the repo and reference the path in your message.
 

@@ -521,18 +521,28 @@ async function handleSlashSpinUp(interaction: ChatInputCommandInteraction): Prom
     const worktreeDir = join(HIVE_ROOT, 'worktrees', agentName)
     mkdirSync(worktreeDir, { recursive: true })
 
-    // Compose system prompt
-    let systemPrompt = `You are a Hive agent named ${agentName} with role: ${role}.\n`
-    systemPrompt += `You operate in a git worktree at: ${worktreeDir}\n`
-    systemPrompt += `Communicate via Discord. Your worker ID is: ${agentName}\n`
+    // Compose system prompt from worker-system-prompt.md + profiles + memory
+    const workerPromptPath = join(HIVE_ROOT, 'config', 'worker-system-prompt.md')
+    let systemPrompt = existsSync(workerPromptPath)
+      ? readFileSync(workerPromptPath, 'utf8')
+          .replace(/\{NAME\}/g, agentName)
+          .replace(/\{ROLE\}/g, role)
+      : `You are a Hive agent named ${agentName} with role: ${role}.\nYour branch is hive/${agentName}.\n`
 
-    // Append role profile if available
-    const profilePath = join(HIVE_ROOT, 'config', 'profiles', `${role}.md`)
+    // Append base profile (always) + role profile (if exists, else warn)
     const basePath = join(HIVE_ROOT, 'config', 'profiles', '_base.md')
+    const profilePath = join(HIVE_ROOT, 'config', 'profiles', `${role}.md`)
+    if (existsSync(basePath)) {
+      systemPrompt += '\n\n' + readFileSync(basePath, 'utf8').replace(/\{NAME\}/g, agentName)
+    }
     if (existsSync(profilePath)) {
-      systemPrompt += '\n' + readFileSync(profilePath, 'utf8')
-    } else if (existsSync(basePath)) {
-      systemPrompt += '\n' + readFileSync(basePath, 'utf8')
+      systemPrompt += '\n\n' + readFileSync(profilePath, 'utf8')
+    }
+
+    // Append memory prompt section + memory restoration
+    const memoryPromptPath = join(HIVE_ROOT, 'config', 'memory-prompt-section.md')
+    if (existsSync(memoryPromptPath)) {
+      systemPrompt += '\n\n' + readFileSync(memoryPromptPath, 'utf8').replace(/\{NAME\}/g, agentName)
     }
 
     // Build MCP config path (reuse existing worker config if present)

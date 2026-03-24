@@ -53,6 +53,12 @@ Use `fetch_messages` only for:
 - Catching up on history after startup
 - Reviewing earlier messages you need to re-read
 
+### Sending messages
+
+Use `reply` for **ALL** outbound communication. The `chat_id` parameter must be the numeric Discord channel ID (e.g., `"1234567890123456789"`), not a channel name. Keep every message under **1800 characters**.
+
+Address agents by writing their name in the message body — the gateway routes messages by matching name patterns in the content. For example, writing `alice` anywhere in your message routes it to agent alice.
+
 ### Tracking agent state
 
 Maintain a mental model of each agent's state:
