@@ -66,6 +66,13 @@ function noteSent(id: string): void {
   }
 }
 
+const selfSendNonces = new Map<string, string>() // nonce → senderWorkerId
+
+function registerSelfSend(nonce: string, senderId: string): void {
+  selfSendNonces.set(nonce, senderId)
+  setTimeout(() => selfSendNonces.delete(nonce), 30_000)
+}
+
 // ---------------------------------------------------------------------------
 // Text chunking — split on paragraph boundaries, same algorithm as server.ts
 // ---------------------------------------------------------------------------
@@ -141,14 +148,25 @@ async function isMentioned(msg: Message, mentionPatterns: string[]): Promise<boo
 }
 
 client.on('messageCreate', (msg) => {
-  // Skip self-messages
-  if (msg.author.id === client.user?.id) return
-  routeInbound(msg).catch((e) =>
+  if (msg.author.bot && msg.author.id !== client.user?.id) return // ignore other bots
+
+  let excludeSender: string | undefined
+  if (msg.author.id === client.user?.id) {
+    const nonce = (msg as any).nonce as string | undefined
+    if (nonce && selfSendNonces.has(nonce)) {
+      excludeSender = selfSendNonces.get(nonce)!
+      selfSendNonces.delete(nonce)
+    } else {
+      return // unknown self-message, drop to prevent loops
+    }
+  }
+
+  routeInbound(msg, excludeSender).catch((e) =>
     process.stderr.write(`hive-gateway: routeInbound error: ${e}\n`),
   )
 })
 
-async function routeInbound(msg: Message): Promise<void> {
+async function routeInbound(msg: Message, excludeSender?: string): Promise<void> {
   // Resolve effective channel ID — threads inherit parent's channel
   const effectiveChannelId = msg.channel.isThread()
     ? msg.channel.parentId ?? msg.channelId
@@ -159,6 +177,9 @@ async function routeInbound(msg: Message): Promise<void> {
   for (const worker of workers.values()) {
     // Channel match
     if (worker.channelId !== effectiveChannelId) continue
+
+    // Skip the sender to avoid echo loops
+    if (excludeSender && worker.workerId === excludeSender) continue
 
     // Mention gate
     if (worker.requireMention) {
@@ -277,6 +298,7 @@ async function handleSend(req: Request): Promise<Response> {
   const text = body.text as string
   const replyTo = body.reply_to as string | undefined
   const files = (body.files as string[] | undefined) ?? []
+  const sender = body.sender as string | undefined
 
   const ch = await fetchTextChannel(chatId)
   if (!('send' in ch)) throw new Error('channel is not sendable')
@@ -287,8 +309,13 @@ async function handleSend(req: Request): Promise<Response> {
   for (let i = 0; i < chunks.length; i++) {
     const shouldReplyTo = replyTo != null && i === 0
     try {
+      const nonce = Date.now().toString() + Math.random().toString(36).slice(2, 8)
+      if (sender) registerSelfSend(nonce, sender)
+
       const sent = await ch.send({
         content: chunks[i],
+        nonce,
+        enforceNonce: true,
         ...(i === 0 && files.length > 0
           ? { files: files.map((f) => ({ attachment: f })) }
           : {}),
@@ -317,6 +344,9 @@ async function handleReact(req: Request): Promise<Response> {
   return jsonOk()
 }
 
+// NOTE: msg.edit() fires 'messageUpdate', NOT 'messageCreate'.
+// No messageUpdate handler exists, so edits are safe from routing loops.
+// If adding messageUpdate handling later, apply nonce-based sender exclusion.
 async function handleEdit(req: Request): Promise<Response> {
   const body = await readJson(req)
   const ch = await fetchTextChannel(body.chat_id as string)
@@ -383,6 +413,7 @@ function handleHealth(): Response {
     JSON.stringify({
       status: 'ok',
       connectedAs: client.user?.tag ?? 'unknown',
+      botId: client.user?.id ?? null,
       registeredWorkers: workers.size,
       workers: workerList,
     }),
