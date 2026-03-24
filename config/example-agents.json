@@ -1,0 +1,36 @@
+{
+  "agents": [
+    {
+      "name": "alice",
+      "role": "developer",
+      "created": "2026-03-23T00:00:00.000Z",
+      "status": "configured"
+    },
+    {
+      "name": "bob",
+      "role": "backend-dev",
+      "created": "2026-03-23T00:00:00.000Z",
+      "status": "configured"
+    },
+    {
+      "name": "carol",
+      "role": "qa-engineer",
+      "created": "2026-03-23T00:00:00.000Z",
+      "status": "configured"
+    },
+    {
+      "name": "dave",
+      "role": "frontend-dev",
+      "created": "2026-03-23T00:00:00.000Z",
+      "status": "configured"
+    },
+    {
+      "name": "eve",
+      "role": "security-reviewer",
+      "created": "2026-03-23T00:00:00.000Z",
+      "status": "configured"
+    }
+  ],
+  "created": "2026-03-23T00:00:00.000Z",
+  "mode": "single-bot"
+}

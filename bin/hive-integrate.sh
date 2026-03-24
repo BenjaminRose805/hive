@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# hive-integrate.sh - Merge completed worker branches into a target branch
+# hive-integrate.sh - Merge completed worker/agent branches into a target branch
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
@@ -19,12 +19,13 @@ usage() {
   cat <<'EOF'
 Usage: hive-integrate.sh --repo PATH --workers LIST [options]
 
-Merges completed worker branches back into a target branch, runs tests,
+Merges completed agent branches back into a target branch, runs tests,
 and handles conflicts.
 
 Required:
   --repo PATH         Path to the git repository
-  --workers LIST      Comma-separated worker IDs to integrate (e.g., worker-01,worker-03)
+  --workers LIST      Comma-separated agent names or worker IDs to integrate
+                      (e.g., alice,bob  or  worker-01,worker-03)
 
 Options:
   --target BRANCH     Target branch to merge into (default: main)
@@ -34,9 +35,10 @@ Options:
   --help              Show this help and exit
 
 Examples:
+  hive-integrate.sh --repo /path/to/repo --workers alice,bob --target main
+  hive-integrate.sh --repo /path/to/repo --workers alice --dry-run
+  hive-integrate.sh --repo /path/to/repo --workers alice,bob --auto-resolve --test-cmd "make test"
   hive-integrate.sh --repo /path/to/repo --workers worker-01,worker-02 --target main
-  hive-integrate.sh --repo /path/to/repo --workers worker-01 --dry-run
-  hive-integrate.sh --repo /path/to/repo --workers worker-01,worker-02 --auto-resolve --test-cmd "make test"
 EOF
 }
 
@@ -110,7 +112,7 @@ REPO="$(cd "$REPO" 2>/dev/null && pwd)" || die "Repository path does not exist: 
 # Verify it is a git repo
 [[ -d "$REPO/.git" ]] || die "Not a git repository: $REPO"
 
-# Split workers into array
+# Split workers into array (accepts both named agents and numeric IDs)
 IFS=',' read -ra WORKER_LIST <<< "$WORKERS"
 [[ ${#WORKER_LIST[@]} -gt 0 ]] || die "No workers specified"
 
@@ -123,7 +125,7 @@ if [[ "$DRY_RUN" = true ]]; then
   echo "═══════════════════════════════════"
   echo "  Repository : $REPO"
   echo "  Target     : $TARGET"
-  echo "  Workers    : ${WORKER_LIST[*]}"
+  echo "  Agents     : ${WORKER_LIST[*]}"
   echo "═══════════════════════════════════"
   echo ""
 
@@ -175,12 +177,12 @@ cd "$REPO"
 git rev-parse --verify "refs/heads/$TARGET" >/dev/null 2>&1 \
   || die "Target branch '$TARGET' does not exist"
 
-# Verify each worker branch exists
+# Verify each agent branch exists
 for WORKER in "${WORKER_LIST[@]}"; do
   WORKER="$(echo "$WORKER" | xargs)"
   BRANCH="hive/$WORKER"
   git rev-parse --verify "refs/heads/$BRANCH" >/dev/null 2>&1 \
-    || die "Worker branch '$BRANCH' does not exist"
+    || die "Agent branch '$BRANCH' does not exist"
 done
 
 # Verify working directory is clean
@@ -247,7 +249,7 @@ for WORKER in "${WORKER_LIST[@]}"; do
     fi
   fi
 
-  echo "  ✓ Merged $BRANCH"
+  echo "  Merged $BRANCH"
   MERGED_COUNT=$((MERGED_COUNT + 1))
   MERGED_WORKERS+=("$WORKER")
 done
@@ -271,12 +273,12 @@ if [[ -n "$TEST_CMD" ]]; then
     # Try to parse a summary line for display
     SUMMARY_LINE="$(grep -Ei '[0-9]+ (passing|passed|tests? passed|ok)' "$TEST_OUTPUT_FILE" | tail -1 || true)"
     TEST_DETAIL="${SUMMARY_LINE:-}"
-    echo "  ✓ All tests passed"
+    echo "  All tests passed"
   else
     TEST_RESULT="FAILED"
     TEST_DETAIL=""
     echo ""
-    echo "✗ Tests failed!"
+    echo "Tests failed!"
     echo "To rollback: git reset --hard $PRE_MERGE_SHA"
     rm -f "$TEST_OUTPUT_FILE"
     exit 1
@@ -297,7 +299,7 @@ echo ""
 echo "═══════════════════════════════════"
 echo "  Integration Complete"
 echo "═══════════════════════════════════"
-echo "  Workers merged : $(IFS=', '; echo "${MERGED_WORKERS[*]}")"
+echo "  Agents merged  : $(IFS=', '; echo "${MERGED_WORKERS[*]}")"
 echo "  Target branch  : $TARGET"
 echo "  Merge commits  : $MERGED_COUNT"
 if [[ "$TEST_RESULT" = "skipped" ]]; then

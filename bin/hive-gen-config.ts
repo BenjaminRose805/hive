@@ -3,6 +3,7 @@
  * hive-gen-config.ts
  * Generates per-worker and manager configuration files for a Hive Discord orchestration setup.
  * Supports multi-bot mode (default) and single-bot gateway mode (--single-bot).
+ * Supports named agents (--agents) or numeric workers (--workers N).
  */
 
 import { existsSync, mkdirSync, writeFileSync, chmodSync, readFileSync } from "fs";
@@ -15,6 +16,8 @@ import { execSync } from "child_process";
 
 interface Args {
   workers: number;
+  agentNames: string[] | null;   // null = use numeric worker-NN names
+  agentRoles: Map<string, string>;
   channelId: string;
   // multi-bot fields
   managerBotId: string;
@@ -27,6 +30,7 @@ interface Args {
   // shared
   projectRepo: string | null;
   branchPrefix: string;
+  branchPrefixExplicit: boolean;  // was --branch-prefix explicitly set?
   budget: number;
   help: boolean;
 }
@@ -64,6 +68,19 @@ interface GatewayConfigJson {
   workers: GatewayWorkerConfig[];
 }
 
+interface AgentEntry {
+  name: string;
+  role: string;
+  created: string;
+  status: string;
+}
+
+interface AgentsJson {
+  agents: AgentEntry[];
+  created: string;
+  mode: "single-bot" | "multi-bot";
+}
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -71,6 +88,9 @@ interface GatewayConfigJson {
 const HIVE_ROOT = resolve(import.meta.dir, "..");
 const DISCORD_PLUGIN_PATH =
   "/home/benjamin/.claude/plugins/cache/claude-plugins-official/discord/0.0.1";
+
+const RESERVED_NAMES = new Set(["manager", "gateway", "all-workers", "all-agents", "hive"]);
+const AGENT_NAME_RE = /^[a-zA-Z0-9-]{1,32}$/;
 
 // ---------------------------------------------------------------------------
 // Help
@@ -87,11 +107,21 @@ MODES
   Multi-bot mode (default): each worker has its own Discord bot token.
   Single-bot mode (--single-bot): one bot token shared via a gateway process.
 
+AGENT NAMING
+  --agents <names>          Comma-separated agent names (e.g. alice,bob,carol).
+                            Overrides --workers N. Names must be alphanumeric +
+                            hyphens, 1-32 chars. Reserved: manager, gateway,
+                            all-workers, all-agents, hive.
+  --roles <name:role,...>   Optional role assignments (e.g. alice:developer,bob:qa).
+  --workers N               Number of workers using auto-names worker-01..NN (default: 3).
+                            Ignored when --agents is provided.
+
 OPTIONS (shared)
-  --workers N               Number of worker bots (default: 3)
   --channel-id <snowflake>  Discord channel ID used for communication (required)
   --project-repo <path>     Git repo path to create worktrees from (optional)
-  --branch-prefix <string>  Branch name prefix for worktrees (default: hive/worker-)
+  --branch-prefix <string>  Branch name prefix for worktrees.
+                            Default: "hive/" when --agents is used,
+                                     "hive/worker-" when --workers N is used.
   --budget <number>         USD budget per worker (default: 5)
   --help                    Show this help message
 
@@ -107,47 +137,56 @@ OPTIONS (single-bot mode)
 
 OUTPUT STRUCTURE (multi-bot mode)
   state/
+    agents.json
     manager/
       access.json
       .env
       mcp-config.json
     workers/
-      worker-NN/
+      <name>/
         access.json
         .env
         mcp-config.json
 
 OUTPUT STRUCTURE (single-bot mode)
   state/
+    agents.json
     gateway/
       config.json
     manager/
       access.json
       mcp-config.json         (relay mode — no .env)
     workers/
-      worker-NN/
+      <name>/
         access.json
         mcp-config.json       (relay mode — no .env)
 
   worktrees/
-    worker-NN/               (if --project-repo is provided)
+    <name>/                  (if --project-repo is provided)
 
 EXAMPLES
-  # Multi-bot mode
+  # Named agents (single-bot mode)
   bun run bin/hive-gen-config.ts \\
-    --workers 3 \\
-    --channel-id 1234567890123456789 \\
-    --manager-bot-id 111111111111111111 \\
-    --worker-bot-ids 222222222222222222,333333333333333333,444444444444444444 \\
-    --tokens-file ./tokens.txt
+    --agents alice,bob,carol \\
+    --roles alice:developer,bob:backend-dev,carol:qa-engineer \\
+    --single-bot \\
+    --token "Bot MySecretToken" \\
+    --channel-id 1234567890123456789
 
-  # Single-bot mode
+  # Numeric workers — backwards compatible (single-bot mode)
   bun run bin/hive-gen-config.ts \\
     --single-bot \\
     --token "Bot MySecretToken" \\
-    --bot-id 111111111111111111 \\
     --channel-id 1234567890123456789 \\
-    --workers 2
+    --workers 3
+
+  # Multi-bot mode with named agents
+  bun run bin/hive-gen-config.ts \\
+    --agents alice,bob \\
+    --channel-id 1234567890123456789 \\
+    --manager-bot-id 111111111111111111 \\
+    --worker-bot-ids 222222222222222222,333333333333333333 \\
+    --tokens-file ./tokens.txt
 `);
 }
 
@@ -158,6 +197,8 @@ EXAMPLES
 function parseArgs(argv: string[]): Args {
   const args: Args = {
     workers: 3,
+    agentNames: null,
+    agentRoles: new Map(),
     channelId: "",
     managerBotId: "",
     workerBotIds: [],
@@ -167,6 +208,7 @@ function parseArgs(argv: string[]): Args {
     botId: "",
     projectRepo: null,
     branchPrefix: "hive/worker-",
+    branchPrefixExplicit: false,
     budget: 5,
     help: false,
   };
@@ -183,6 +225,27 @@ function parseArgs(argv: string[]): Args {
       case "--workers":
         args.workers = parseInt(raw[++i], 10);
         break;
+      case "--agents": {
+        const names = raw[++i].split(",").map((s) => s.trim()).filter(Boolean);
+        args.agentNames = names;
+        break;
+      }
+      case "--roles": {
+        const pairs = raw[++i].split(",").map((s) => s.trim()).filter(Boolean);
+        for (const pair of pairs) {
+          const colon = pair.indexOf(":");
+          if (colon === -1) {
+            console.error(`ERROR: Invalid --roles entry "${pair}". Expected format: name:role`);
+            process.exit(1);
+          }
+          const name = pair.slice(0, colon).trim();
+          const role = pair.slice(colon + 1).trim();
+          if (name && role) {
+            args.agentRoles.set(name, role);
+          }
+        }
+        break;
+      }
       case "--channel-id":
         args.channelId = raw[++i];
         break;
@@ -209,6 +272,7 @@ function parseArgs(argv: string[]): Args {
         break;
       case "--branch-prefix":
         args.branchPrefix = raw[++i];
+        args.branchPrefixExplicit = true;
         break;
       case "--budget":
         args.budget = parseFloat(raw[++i]);
@@ -221,6 +285,73 @@ function parseArgs(argv: string[]): Args {
   }
 
   return args;
+}
+
+// ---------------------------------------------------------------------------
+// Agent name validation
+// ---------------------------------------------------------------------------
+
+function validateAgentNames(names: string[]): void {
+  for (const name of names) {
+    if (!AGENT_NAME_RE.test(name)) {
+      console.error(
+        `ERROR: Invalid agent name "${name}". Names must be alphanumeric + hyphens only, 1-32 characters.`
+      );
+      process.exit(1);
+    }
+    if (RESERVED_NAMES.has(name.toLowerCase())) {
+      console.error(
+        `ERROR: Agent name "${name}" is reserved. Reserved names: ${[...RESERVED_NAMES].join(", ")}`
+      );
+      process.exit(1);
+    }
+  }
+
+  // Check for duplicates
+  const seen = new Set<string>();
+  for (const name of names) {
+    if (seen.has(name.toLowerCase())) {
+      console.error(`ERROR: Duplicate agent name "${name}".`);
+      process.exit(1);
+    }
+    seen.add(name.toLowerCase());
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Resolve effective agent list + branch prefix
+// ---------------------------------------------------------------------------
+
+function resolveAgents(args: Args): { names: string[]; branchPrefix: string } {
+  let names: string[];
+
+  if (args.agentNames !== null) {
+    // Named mode: validate provided names
+    validateAgentNames(args.agentNames);
+    names = args.agentNames;
+    // Derive worker count from names list
+    args.workers = names.length;
+  } else {
+    // Numeric mode: auto-generate worker-01, worker-02, ...
+    names = [];
+    for (let n = 1; n <= args.workers; n++) {
+      names.push(`worker-${workerLabel(n, args.workers)}`);
+    }
+  }
+
+  // Determine branch prefix
+  let branchPrefix: string;
+  if (args.branchPrefixExplicit) {
+    branchPrefix = args.branchPrefix;
+  } else if (args.agentNames !== null) {
+    // Named mode default: "hive/" → produces "hive/alice"
+    branchPrefix = "hive/";
+  } else {
+    // Numeric mode default: "hive/worker-" → produces "hive/worker-01"
+    branchPrefix = "hive/worker-";
+  }
+
+  return { names, branchPrefix };
 }
 
 // ---------------------------------------------------------------------------
@@ -245,7 +376,7 @@ function validateMultiBot(args: Args): { tokens: string[] } {
   // Verify worker bot ID count matches --workers
   if (args.workerBotIds.length !== args.workers) {
     console.error(
-      `ERROR: --worker-bot-ids has ${args.workerBotIds.length} IDs but --workers is ${args.workers}. They must match.`
+      `ERROR: --worker-bot-ids has ${args.workerBotIds.length} IDs but workers count is ${args.workers}. They must match.`
     );
     process.exit(1);
   }
@@ -293,7 +424,7 @@ function validateSingleBot(args: Args): void {
 
   if (!args.channelId) errors.push("--channel-id is required");
   if (!args.token) errors.push("--token is required in --single-bot mode");
-  if (!args.botId) errors.push("--bot-id is required in --single-bot mode");
+  // --bot-id is optional — the gateway discovers it at runtime from client.user.id
   if (isNaN(args.workers) || args.workers < 1) errors.push("--workers must be a positive integer");
 
   // Reject multi-bot flags
@@ -309,7 +440,7 @@ function validateSingleBot(args: Args): void {
 }
 
 // ---------------------------------------------------------------------------
-// Zero-padded worker label
+// Zero-padded worker label (used only for numeric mode)
 // ---------------------------------------------------------------------------
 
 function workerLabel(n: number, total: number): string {
@@ -437,10 +568,73 @@ function addWorktree(
 }
 
 // ---------------------------------------------------------------------------
+// agents.json management
+// ---------------------------------------------------------------------------
+
+function loadOrCreateAgentsJson(agentsPath: string): AgentsJson {
+  if (existsSync(agentsPath)) {
+    try {
+      const raw = readFileSync(agentsPath, "utf-8");
+      return JSON.parse(raw) as AgentsJson;
+    } catch {
+      console.warn(`  WARN  Could not parse existing state/agents.json — starting fresh.`);
+    }
+  }
+  return { agents: [], created: new Date().toISOString(), mode: "single-bot" };
+}
+
+function mergeAgentsJson(
+  existing: AgentsJson,
+  newAgents: AgentEntry[],
+  mode: "single-bot" | "multi-bot"
+): AgentsJson {
+  const existingByName = new Map<string, AgentEntry>(
+    existing.agents.map((a) => [a.name, a])
+  );
+
+  for (const agent of newAgents) {
+    if (existingByName.has(agent.name)) {
+      console.warn(`  WARN  Agent "${agent.name}" already exists in agents.json — preserving existing entry.`);
+    } else {
+      existingByName.set(agent.name, agent);
+    }
+  }
+
+  return {
+    agents: [...existingByName.values()],
+    created: existing.created,
+    mode,
+  };
+}
+
+function writeAgentsJson(
+  stateRoot: string,
+  agentNames: string[],
+  agentRoles: Map<string, string>,
+  mode: "single-bot" | "multi-bot",
+  agentsPath: string
+): void {
+  const now = new Date().toISOString();
+  const newAgents: AgentEntry[] = agentNames.map((name) => ({
+    name,
+    role: agentRoles.get(name) ?? "developer",
+    created: now,
+    status: "configured",
+  }));
+
+  const existing = loadOrCreateAgentsJson(agentsPath);
+  const merged = mergeAgentsJson(existing, newAgents, mode);
+
+  writeJson(agentsPath, merged);
+  console.log(`  CREATE  state/agents.json`);
+}
+
+// ---------------------------------------------------------------------------
 // Single-bot mode generation
 // ---------------------------------------------------------------------------
 
 function generateSingleBot(args: Args): void {
+  const { names, branchPrefix } = resolveAgents(args);
   const stateRoot = join(HIVE_ROOT, "state");
   const worktreesRoot = join(HIVE_ROOT, "worktrees");
 
@@ -457,12 +651,11 @@ function generateSingleBot(args: Args): void {
     },
   ];
 
-  for (let n = 1; n <= args.workers; n++) {
-    const label = workerLabel(n, args.workers);
+  for (const name of names) {
     gatewayWorkers.push({
-      workerId: `worker-${label}`,
-      socketPath: `/tmp/hive-gateway/worker-${label}.sock`,
-      mentionPatterns: [`worker-${label}`, "all-workers"],
+      workerId: name,
+      socketPath: `/tmp/hive-gateway/${name}.sock`,
+      mentionPatterns: [name, "all-workers"],
       requireMention: true,
     });
   }
@@ -476,7 +669,7 @@ function generateSingleBot(args: Args): void {
 
   const gatewayConfig: GatewayConfigJson = {
     botToken: args.token,
-    botId: args.botId,
+    botId: args.botId || "(auto-discovered at runtime)",
     channelId: args.channelId,
     socketPath: "/tmp/hive-gateway/gateway.sock",
     workers: gatewayWorkers,
@@ -522,12 +715,11 @@ function generateSingleBot(args: Args): void {
   console.log(`  CREATE  state/manager/mcp-config.json`);
 
   // -------------------------------------------------------------------------
-  // Generate per-worker configs
+  // Generate per-agent configs
   // -------------------------------------------------------------------------
 
-  for (let n = 1; n <= args.workers; n++) {
-    const label = workerLabel(n, args.workers);
-    const workerDir = join(stateRoot, "workers", `worker-${label}`);
+  for (const name of names) {
+    const workerDir = join(stateRoot, "workers", name);
     ensureDir(workerDir);
 
     const workerAccess: AccessJson = {
@@ -540,7 +732,7 @@ function generateSingleBot(args: Args): void {
         },
       },
       pending: {},
-      mentionPatterns: [`worker-${label}`, "all-workers"],
+      mentionPatterns: [name, "all-workers"],
     };
 
     writeJson(join(workerDir, "access.json"), workerAccess);
@@ -548,27 +740,34 @@ function generateSingleBot(args: Args): void {
       join(workerDir, "mcp-config.json"),
       buildRelayMcpConfig(
         workerDir,
-        `worker-${label}`,
-        `/tmp/hive-gateway/worker-${label}.sock`,
+        name,
+        `/tmp/hive-gateway/${name}.sock`,
         args.channelId,
-        `worker-${label},all-workers`,
+        `${name},all-workers`,
         true
       )
     );
 
-    console.log(`  CREATE  state/workers/worker-${label}/access.json`);
-    console.log(`  CREATE  state/workers/worker-${label}/mcp-config.json`);
+    console.log(`  CREATE  state/workers/${name}/access.json`);
+    console.log(`  CREATE  state/workers/${name}/mcp-config.json`);
 
     // -----------------------------------------------------------------------
     // Git worktree
     // -----------------------------------------------------------------------
     if (args.projectRepo) {
       const repoPath = resolve(args.projectRepo);
-      const worktreePath = join(worktreesRoot, `worker-${label}`);
-      const branch = `${args.branchPrefix}${label}`;
+      const worktreePath = join(worktreesRoot, name);
+      const branch = `${branchPrefix}${name}`;
       addWorktree(repoPath, worktreePath, branch);
     }
   }
+
+  // -------------------------------------------------------------------------
+  // Write agents.json
+  // -------------------------------------------------------------------------
+
+  const agentsPath = join(stateRoot, "agents.json");
+  writeAgentsJson(stateRoot, names, args.agentRoles, "single-bot", agentsPath);
 
   // -------------------------------------------------------------------------
   // Summary
@@ -576,10 +775,10 @@ function generateSingleBot(args: Args): void {
 
   console.log("");
   console.log("Done (single-bot mode). Summary:");
-  console.log(`  Bot ID         : ${args.botId}`);
-  console.log(`  Workers        : ${args.workers}`);
+  console.log(`  Bot ID         : ${args.botId || "(auto-discovered at runtime)"}`);
+  console.log(`  Agents         : ${names.join(", ")}`);
   console.log(`  Channel ID     : ${args.channelId}`);
-  console.log(`  Budget/worker  : $${args.budget}`);
+  console.log(`  Budget/agent   : $${args.budget}`);
   console.log(`  State root     : ${stateRoot}`);
   console.log(`  Gateway config : ${join(gatewayDir, "config.json")}`);
   if (args.projectRepo) {
@@ -588,8 +787,8 @@ function generateSingleBot(args: Args): void {
   console.log("");
   console.log("Next steps:");
   console.log("  1. Start the gateway process with state/gateway/config.json");
-  console.log("  2. Start each worker session with its mcp-config.json");
-  console.log("  3. Use the Hive manager to coordinate workers via Discord");
+  console.log("  2. Start each agent session with its mcp-config.json");
+  console.log("  3. Use the Hive manager to coordinate agents via Discord");
 }
 
 // ---------------------------------------------------------------------------
@@ -597,6 +796,7 @@ function generateSingleBot(args: Args): void {
 // ---------------------------------------------------------------------------
 
 function generateMultiBot(args: Args, tokens: string[]): void {
+  const { names, branchPrefix } = resolveAgents(args);
   const managerToken = tokens[0];
   const workerTokens = tokens.slice(1);
 
@@ -632,15 +832,15 @@ function generateMultiBot(args: Args, tokens: string[]): void {
   console.log(`  CREATE  state/manager/mcp-config.json`);
 
   // -------------------------------------------------------------------------
-  // Generate per-worker configs
+  // Generate per-agent configs
   // -------------------------------------------------------------------------
 
-  for (let n = 1; n <= args.workers; n++) {
-    const label = workerLabel(n, args.workers);
-    const workerDir = join(stateRoot, "workers", `worker-${label}`);
+  for (let idx = 0; idx < names.length; idx++) {
+    const name = names[idx];
+    const workerDir = join(stateRoot, "workers", name);
     ensureDir(workerDir);
 
-    const otherWorkerIds = args.workerBotIds.filter((_, idx) => idx !== n - 1);
+    const otherWorkerIds = args.workerBotIds.filter((_, i) => i !== idx);
 
     const workerAccess: AccessJson = {
       dmPolicy: "disabled",
@@ -652,27 +852,34 @@ function generateMultiBot(args: Args, tokens: string[]): void {
         },
       },
       pending: {},
-      mentionPatterns: [`worker-${label}`, "all-workers"],
+      mentionPatterns: [name, "all-workers"],
     };
 
     writeJson(join(workerDir, "access.json"), workerAccess);
-    writeEnv(join(workerDir, ".env"), workerTokens[n - 1]);
+    writeEnv(join(workerDir, ".env"), workerTokens[idx]);
     writeJson(join(workerDir, "mcp-config.json"), buildMcpConfig(workerDir));
 
-    console.log(`  CREATE  state/workers/worker-${label}/access.json`);
-    console.log(`  CREATE  state/workers/worker-${label}/.env (mode 0600)`);
-    console.log(`  CREATE  state/workers/worker-${label}/mcp-config.json`);
+    console.log(`  CREATE  state/workers/${name}/access.json`);
+    console.log(`  CREATE  state/workers/${name}/.env (mode 0600)`);
+    console.log(`  CREATE  state/workers/${name}/mcp-config.json`);
 
     // -----------------------------------------------------------------------
     // Git worktree
     // -----------------------------------------------------------------------
     if (args.projectRepo) {
       const repoPath = resolve(args.projectRepo);
-      const worktreePath = join(worktreesRoot, `worker-${label}`);
-      const branch = `${args.branchPrefix}${label}`;
+      const worktreePath = join(worktreesRoot, name);
+      const branch = `${branchPrefix}${name}`;
       addWorktree(repoPath, worktreePath, branch);
     }
   }
+
+  // -------------------------------------------------------------------------
+  // Write agents.json
+  // -------------------------------------------------------------------------
+
+  const agentsPath = join(stateRoot, "agents.json");
+  writeAgentsJson(stateRoot, names, args.agentRoles, "multi-bot", agentsPath);
 
   // -------------------------------------------------------------------------
   // Summary
@@ -681,9 +888,9 @@ function generateMultiBot(args: Args, tokens: string[]): void {
   console.log("");
   console.log("Done. Summary:");
   console.log(`  Manager bot ID : ${args.managerBotId}`);
-  console.log(`  Workers        : ${args.workers}`);
+  console.log(`  Agents         : ${names.join(", ")}`);
   console.log(`  Channel ID     : ${args.channelId}`);
-  console.log(`  Budget/worker  : $${args.budget}`);
+  console.log(`  Budget/agent   : $${args.budget}`);
   console.log(`  State root     : ${stateRoot}`);
   if (args.projectRepo) {
     console.log(`  Worktrees      : ${worktreesRoot}`);
@@ -692,7 +899,7 @@ function generateMultiBot(args: Args, tokens: string[]): void {
   console.log("Next steps:");
   console.log("  1. Start each bot session with its mcp-config.json");
   console.log("  2. Set DISCORD_STATE_DIR to the appropriate state directory");
-  console.log("  3. Use the Hive manager to coordinate workers via Discord");
+  console.log("  3. Use the Hive manager to coordinate agents via Discord");
 }
 
 // ---------------------------------------------------------------------------
@@ -708,9 +915,19 @@ function main(): void {
   }
 
   if (args.singleBot) {
+    // validateSingleBot checks args.workers but we may have derived it from agentNames already
+    // Resolve agents first so workers count is correct before validation
+    if (args.agentNames !== null) {
+      validateAgentNames(args.agentNames);
+      args.workers = args.agentNames.length;
+    }
     validateSingleBot(args);
     generateSingleBot(args);
   } else {
+    if (args.agentNames !== null) {
+      validateAgentNames(args.agentNames);
+      args.workers = args.agentNames.length;
+    }
     const { tokens } = validateMultiBot(args);
     generateMultiBot(args, tokens);
   }

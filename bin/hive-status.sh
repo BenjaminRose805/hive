@@ -112,11 +112,62 @@ get_uptime() {
 }
 
 # ---------------------------------------------------------------------------
+# Tmux output
+# ---------------------------------------------------------------------------
+
+output_tmux() {
+  local pids_file="$1"
+  local agents_file="$HIVE_DIR/state/agents.json"
+
+  local session
+  session="$(jq -r '.session // "hive"' "$pids_file" 2>/dev/null || echo "hive")"
+  local started
+  started="$(jq -r '.started // empty' "$pids_file" 2>/dev/null || true)"
+  local worker_count
+  worker_count="$(jq -r '.workers // 0' "$pids_file" 2>/dev/null || echo 0)"
+
+  echo ""
+  echo "Hive Status (tmux mode)"
+  printf '\u2550%.0s' {1..40}
+  echo ""
+  echo " Session: $session"
+  echo " Started: ${started:-unknown}"
+  echo " Agents:  $worker_count"
+  echo ""
+
+  # Show agent names and roles if agents.json exists
+  if [[ -f "$agents_file" ]]; then
+    echo " Agents:"
+    while IFS= read -r line; do
+      echo "   $line"
+    done < <(jq -r '.agents[] | "  \(.name) (\(.role)) — \(.status)"' "$agents_file" 2>/dev/null || true)
+    echo ""
+  fi
+
+  if tmux has-session -t "$session" 2>/dev/null; then
+    echo " Session status: RUNNING"
+    echo ""
+    echo " Windows:"
+    tmux list-windows -t "$session" -F "   #I: #{window_name}  [#{window_activity_flag:+active}#{?window_last_flag,last,}]" 2>/dev/null || true
+  else
+    echo " Session status: NOT RUNNING"
+    echo " (Start with: hive-launch.sh --tmux ...)"
+  fi
+
+  printf '\u2550%.0s' {1..40}
+  echo ""
+  echo " Attach:   tmux attach -t $session"
+  echo " Teardown: hive-launch.sh --teardown"
+  echo ""
+}
+
+# ---------------------------------------------------------------------------
 # JSON output
 # ---------------------------------------------------------------------------
 
 output_json() {
   local pids_file="$1"
+  local agents_file="$HIVE_DIR/state/agents.json"
 
   local result
   result="$(jq '.' "$pids_file")"
@@ -144,30 +195,62 @@ output_json() {
     --argjson raw "$result" \
     '$raw + { manager: ($raw.manager + { status: $manager_status }), watchdog: ($raw.watchdog + { status: $watchdog_status }), uptime: $uptime }')"
 
-  # Add per-worker status
-  local worker_count
-  worker_count="$(jq '.workers | length' "$pids_file" 2>/dev/null || echo 0)"
+  # Add per-worker status — read from agents.json if available, otherwise fall back to pids.json
+  if [[ -f "$agents_file" ]]; then
+    local agents_json
+    agents_json="$(jq '.agents' "$agents_file")"
+    output="$(echo "$output" | jq --argjson agents "$agents_json" '. + { agents: $agents }')"
 
-  for i in $(seq 0 $(( worker_count - 1 ))); do
-    local wpid
-    wpid="$(jq -r ".workers[$i].pid // empty" "$pids_file" 2>/dev/null || true)"
-    local wstatus
-    wstatus="$(check_pid "$wpid")"
-    local wid
-    wid="$(jq -r ".workers[$i].id" "$pids_file" 2>/dev/null || true)"
-    local worktree_dir="$HIVE_DIR/worktrees/worker-$wid"
-    local branch
-    branch="$(get_branch "$worktree_dir")"
-    local commits
-    commits="$(get_commits_ahead "$worktree_dir")"
+    # Enrich each agent with live data
+    local agent_count
+    agent_count="$(jq '.agents | length' "$agents_file" 2>/dev/null || echo 0)"
+    for i in $(seq 0 $(( agent_count - 1 ))); do
+      local aname
+      aname="$(jq -r ".agents[$i].name" "$agents_file" 2>/dev/null || true)"
+      local worktree_dir="$HIVE_DIR/worktrees/$aname"
+      local branch
+      branch="$(get_branch "$worktree_dir")"
+      local commits
+      commits="$(get_commits_ahead "$worktree_dir")"
+      # Find PID from pids.json workers array (matched by name)
+      local wpid
+      wpid="$(jq -r ".workers[]? | select(.name == \"$aname\") | .pid // empty" "$pids_file" 2>/dev/null || true)"
+      local wstatus
+      wstatus="$(check_pid "$wpid")"
 
-    output="$(echo "$output" | jq \
-      --argjson idx "$i" \
-      --arg status "$wstatus" \
-      --arg branch "$branch" \
-      --arg commits "$commits" \
-      '.workers[$idx] += { status: $status, branch: $branch, commits: $commits }')"
-  done
+      output="$(echo "$output" | jq \
+        --argjson idx "$i" \
+        --arg status "$wstatus" \
+        --arg branch "$branch" \
+        --arg commits "$commits" \
+        '.agents[$idx] += { live_status: $status, branch: $branch, commits: $commits }')"
+    done
+  else
+    # Fallback: use pids.json workers array
+    local worker_count
+    worker_count="$(jq '.workers | length' "$pids_file" 2>/dev/null || echo 0)"
+
+    for i in $(seq 0 $(( worker_count - 1 ))); do
+      local wpid
+      wpid="$(jq -r ".workers[$i].pid // empty" "$pids_file" 2>/dev/null || true)"
+      local wstatus
+      wstatus="$(check_pid "$wpid")"
+      local wname
+      wname="$(jq -r ".workers[$i].name // .workers[$i].id" "$pids_file" 2>/dev/null || true)"
+      local worktree_dir="$HIVE_DIR/worktrees/$wname"
+      local branch
+      branch="$(get_branch "$worktree_dir")"
+      local commits
+      commits="$(get_commits_ahead "$worktree_dir")"
+
+      output="$(echo "$output" | jq \
+        --argjson idx "$i" \
+        --arg status "$wstatus" \
+        --arg branch "$branch" \
+        --arg commits "$commits" \
+        '.workers[$idx] += { status: $status, branch: $branch, commits: $commits }')"
+    done
+  fi
 
   echo "$output" | jq '.'
 }
@@ -178,23 +261,26 @@ output_json() {
 
 output_table() {
   local pids_file="$1"
+  local agents_file="$HIVE_DIR/state/agents.json"
 
   local uptime
   uptime="$(get_uptime "$pids_file")"
 
   echo ""
   echo "Hive Status"
-  printf '\u2550%.0s' {1..51}
+  printf '\u2550%.0s' {1..60}
   echo ""
-  printf " %-10s \u2502 %-6s \u2502 %-6s \u2502 %-16s \u2502 %s\n" \
-    "Role" "PID" "Status" "Branch" "Commits"
-  printf '\u2500%.0s' {1..12}
+  printf " %-18s \u2502 %-12s \u2502 %-6s \u2502 %-6s \u2502 %-12s \u2502 %s\n" \
+    "Name" "Role" "PID" "Status" "Branch" "Commits"
+  printf '\u2500%.0s' {1..20}
+  printf '\u253c'
+  printf '\u2500%.0s' {1..14}
   printf '\u253c'
   printf '\u2500%.0s' {1..8}
   printf '\u253c'
   printf '\u2500%.0s' {1..8}
   printf '\u253c'
-  printf '\u2500%.0s' {1..18}
+  printf '\u2500%.0s' {1..14}
   printf '\u253c'
   printf '\u2500%.0s' {1..8}
   echo ""
@@ -206,31 +292,60 @@ output_table() {
   manager_status="$(check_pid "$manager_pid")"
   local manager_pid_display="${manager_pid:-n/a}"
 
-  printf " %-10s \u2502 %-6s \u2502 %-6s \u2502 %-16s \u2502 %s\n" \
-    "manager" "$manager_pid_display" "$manager_status" "main" "-"
+  printf " %-18s \u2502 %-12s \u2502 %-6s \u2502 %-6s \u2502 %-12s \u2502 %s\n" \
+    "manager" "coordinator" "$manager_pid_display" "$manager_status" "main" "-"
 
-  # Worker rows
-  local worker_count
-  worker_count="$(jq '.workers | length' "$pids_file" 2>/dev/null || echo 0)"
+  # Agent rows — prefer agents.json, fall back to pids.json workers
+  if [[ -f "$agents_file" ]]; then
+    local agent_count
+    agent_count="$(jq '.agents | length' "$agents_file" 2>/dev/null || echo 0)"
 
-  for i in $(seq 0 $(( worker_count - 1 ))); do
-    local wid
-    wid="$(jq -r ".workers[$i].id" "$pids_file" 2>/dev/null || true)"
-    local wpid
-    wpid="$(jq -r ".workers[$i].pid" "$pids_file" 2>/dev/null || true)"
-    local wstatus
-    wstatus="$(check_pid "$wpid")"
-    local worktree_dir="$HIVE_DIR/worktrees/worker-$wid"
-    local branch
-    branch="$(get_branch "$worktree_dir")"
-    local commits
-    commits="$(get_commits_ahead "$worktree_dir")"
+    for i in $(seq 0 $(( agent_count - 1 ))); do
+      local aname
+      aname="$(jq -r ".agents[$i].name" "$agents_file" 2>/dev/null || true)"
+      local arole
+      arole="$(jq -r ".agents[$i].role // \"developer\"" "$agents_file" 2>/dev/null || true)"
+      local worktree_dir="$HIVE_DIR/worktrees/$aname"
+      local branch
+      branch="$(get_branch "$worktree_dir")"
+      local commits
+      commits="$(get_commits_ahead "$worktree_dir")"
+      # Look up PID from pids.json workers by name
+      local wpid
+      wpid="$(jq -r ".workers[]? | select(.name == \"$aname\") | .pid // empty" "$pids_file" 2>/dev/null || true)"
+      local wstatus
+      wstatus="$(check_pid "$wpid")"
+      local wpid_display="${wpid:-n/a}"
 
-    printf " %-10s \u2502 %-6s \u2502 %-6s \u2502 %-16s \u2502 %s\n" \
-      "worker-$wid" "$wpid" "$wstatus" "$branch" "$commits"
-  done
+      printf " %-18s \u2502 %-12s \u2502 %-6s \u2502 %-6s \u2502 %-12s \u2502 %s\n" \
+        "$aname" "$arole" "$wpid_display" "$wstatus" "$branch" "$commits"
+    done
+  else
+    # Fallback: use pids.json workers array (legacy numeric IDs)
+    local worker_count
+    worker_count="$(jq '.workers | length' "$pids_file" 2>/dev/null || echo 0)"
 
-  printf '\u2550%.0s' {1..51}
+    for i in $(seq 0 $(( worker_count - 1 ))); do
+      local wname
+      wname="$(jq -r ".workers[$i].name // .workers[$i].id" "$pids_file" 2>/dev/null || true)"
+      local wrole
+      wrole="$(jq -r ".workers[$i].role // \"developer\"" "$pids_file" 2>/dev/null || true)"
+      local wpid
+      wpid="$(jq -r ".workers[$i].pid" "$pids_file" 2>/dev/null || true)"
+      local wstatus
+      wstatus="$(check_pid "$wpid")"
+      local worktree_dir="$HIVE_DIR/worktrees/$wname"
+      local branch
+      branch="$(get_branch "$worktree_dir")"
+      local commits
+      commits="$(get_commits_ahead "$worktree_dir")"
+
+      printf " %-18s \u2502 %-12s \u2502 %-6s \u2502 %-6s \u2502 %-12s \u2502 %s\n" \
+        "$wname" "$wrole" "$wpid" "$wstatus" "$branch" "$commits"
+    done
+  fi
+
+  printf '\u2550%.0s' {1..60}
   echo ""
 
   # Watchdog
@@ -264,7 +379,13 @@ main() {
     exit 1
   fi
 
-  if [[ "$JSON_OUTPUT" == true ]]; then
+  # Check if this is a tmux-mode hive
+  local mode
+  mode="$(jq -r '.mode // empty' "$pids_file" 2>/dev/null || true)"
+
+  if [[ "$mode" == "tmux" ]]; then
+    output_tmux "$pids_file"
+  elif [[ "$JSON_OUTPUT" == true ]]; then
     output_json "$pids_file"
   else
     output_table "$pids_file"

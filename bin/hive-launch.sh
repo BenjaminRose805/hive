@@ -9,6 +9,8 @@ set -euo pipefail
 HIVE_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 # Defaults
 WORKERS=3
+AGENTS_ARG=""
+ROLES_ARG=""
 BUDGET=5
 MANAGER_BUDGET=10
 TOKENS_FILE=""
@@ -38,7 +40,9 @@ USAGE
 OPTIONS
   --project-repo PATH   Git repository to work on (required)
   --channel-id ID       Discord channel ID for communication (required)
-  --workers N           Number of workers (default: 3)
+  --workers N           Number of workers (default: 3, used when --agents is not set)
+  --agents NAMES        Comma-separated agent names (e.g. alice,bob,carol)
+  --roles NAME:ROLE,…   Comma-separated name:role pairs (e.g. alice:developer,bob:qa-engineer)
   --budget N            USD budget per worker (default: 5)
   --manager-budget N    USD budget for manager (default: 10)
   --tokens-file PATH    File with bot tokens, 1 per line, manager first (required in multi-bot mode)
@@ -54,7 +58,15 @@ OPTIONS
   --help                Show this help
 
 EXAMPLES
-  # Launch a 3-worker hive
+  # Launch a named 2-agent hive
+  hive-launch.sh \
+    --project-repo ~/my-project \
+    --channel-id 1234567890 \
+    --agents alice,bob \
+    --roles alice:developer,bob:qa-engineer \
+    --single-bot
+
+  # Launch a 3-worker hive (backwards compat)
   hive-launch.sh \
     --project-repo ~/my-project \
     --channel-id 1234567890 \
@@ -95,6 +107,8 @@ parse_args() {
       --project-repo)    PROJECT_REPO="$2"; shift 2 ;;
       --channel-id)      CHANNEL_ID="$2"; shift 2 ;;
       --workers)         WORKERS="$2"; shift 2 ;;
+      --agents)          AGENTS_ARG="$2"; shift 2 ;;
+      --roles)           ROLES_ARG="$2"; shift 2 ;;
       --budget)          BUDGET="$2"; shift 2 ;;
       --manager-budget)  MANAGER_BUDGET="$2"; shift 2 ;;
       --tokens-file)     TOKENS_FILE="$2"; shift 2 ;;
@@ -118,6 +132,7 @@ parse_args() {
 
 do_teardown() {
   local pids_file="$HIVE_DIR/state/pids.json"
+  local agents_file="$HIVE_DIR/state/agents.json"
 
   if [[ ! -f "$pids_file" ]]; then
     log "No pids.json found — nothing to tear down."
@@ -166,7 +181,7 @@ do_teardown() {
       kill "$manager_pid" 2>/dev/null || true
     fi
 
-    # Kill workers
+    # Kill workers (by agent name)
     local worker_pids
     worker_pids="$(jq -r '.workers[]?.pid // empty' "$pids_file" 2>/dev/null || true)"
     for wpid in $worker_pids; do
@@ -187,7 +202,21 @@ do_teardown() {
     done
   fi
 
-  # Clean worktrees if requested
+  # Update agents.json: set each agent's status to "stopped" and record lastActive
+  if [[ -f "$agents_file" ]]; then
+    local stopped_ts
+    stopped_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    local updated_agents
+    updated_agents="$(jq --arg ts "$stopped_ts" \
+      '.agents = [.agents[] | .status = "stopped" | .lastActive = $ts]' \
+      "$agents_file")" || true
+    if [[ -n "$updated_agents" ]]; then
+      echo "$updated_agents" > "$agents_file"
+      log "Updated agents.json: all agents marked stopped"
+    fi
+  fi
+
+  # Clean worktrees if requested (but preserve memory dirs)
   if [[ "$CLEAN" == true ]] && [[ -d "$HIVE_DIR/worktrees" ]]; then
     log "Removing worktrees ..."
     rm -rf "$HIVE_DIR/worktrees"
@@ -199,10 +228,13 @@ do_teardown() {
     rm -rf "/tmp/hive-gateway"
   fi
 
+  # Clean launch scripts (but NOT memory dirs — memory persists)
+  rm -f "$HIVE_DIR/state"/.launch-*.sh
+
   # Clear pids file
   echo '{}' > "$pids_file"
 
-  log "Teardown complete."
+  log "Teardown complete. Agent memory preserved in state/agents/*/memory/"
   exit 0
 }
 
@@ -244,18 +276,26 @@ validate_prerequisites() {
     # Tokens file
     [[ -f "$TOKENS_FILE" ]] || die "Tokens file not found: $TOKENS_FILE"
 
-    local expected_lines=$(( WORKERS + 1 ))
+    # Determine worker count for validation
+    local worker_count_for_validation
+    if [[ -n "$AGENTS_ARG" ]]; then
+      worker_count_for_validation="$(echo "$AGENTS_ARG" | tr ',' '\n' | grep -c '.' || true)"
+    else
+      worker_count_for_validation="$WORKERS"
+    fi
+
+    local expected_lines=$(( worker_count_for_validation + 1 ))
     local actual_lines
     actual_lines="$(grep -c '.' "$TOKENS_FILE" || true)"
     if [[ "$actual_lines" -ne "$expected_lines" ]]; then
-      die "Tokens file has $actual_lines non-empty lines, expected $expected_lines (1 manager + $WORKERS workers)"
+      die "Tokens file has $actual_lines non-empty lines, expected $expected_lines (1 manager + $worker_count_for_validation workers)"
     fi
 
     # Validate worker-bot-ids count
     local id_count
     id_count="$(echo "$WORKER_BOT_IDS" | tr ',' '\n' | grep -c '.' || true)"
-    if [[ "$id_count" -ne "$WORKERS" ]]; then
-      die "--worker-bot-ids has $id_count IDs but --workers is $WORKERS. They must match."
+    if [[ "$id_count" -ne "$worker_count_for_validation" ]]; then
+      die "--worker-bot-ids has $id_count IDs but worker count is $worker_count_for_validation. They must match."
     fi
   fi
 
@@ -270,9 +310,15 @@ validate_prerequisites() {
   if command -v free &>/dev/null; then
     local avail_mb
     avail_mb="$(free -m | awk '/^Mem:/ { print $7 }')"
-    local needed_mb=$(( WORKERS * 2048 ))
+    local worker_count_for_ram
+    if [[ -n "$AGENTS_ARG" ]]; then
+      worker_count_for_ram="$(echo "$AGENTS_ARG" | tr ',' '\n' | grep -c '.' || true)"
+    else
+      worker_count_for_ram="$WORKERS"
+    fi
+    local needed_mb=$(( worker_count_for_ram * 2048 ))
     if [[ -n "$avail_mb" ]] && [[ "$avail_mb" -lt "$needed_mb" ]]; then
-      warn "Available RAM (~${avail_mb}MB) may be tight for $WORKERS workers (recommend ~${needed_mb}MB free)"
+      warn "Available RAM (~${avail_mb}MB) may be tight for $worker_count_for_ram workers (recommend ~${needed_mb}MB free)"
     fi
   fi
 }
@@ -282,7 +328,7 @@ validate_prerequisites() {
 # ---------------------------------------------------------------------------
 
 generate_configs() {
-  # Skip if configs already exist for the right worker count
+  # Skip if configs already exist
   local manager_mcp="$HIVE_DIR/state/manager/mcp-config.json"
   if [[ -f "$manager_mcp" ]]; then
     log "Config files already exist — skipping generation. Delete state/ to regenerate."
@@ -293,26 +339,43 @@ generate_configs() {
 
   if [[ "$SINGLE_BOT" == true ]]; then
     local gen_args=(
-      --workers "$WORKERS"
       --channel-id "$CHANNEL_ID"
       --project-repo "$PROJECT_REPO"
       --budget "$BUDGET"
       --single-bot
       --token "$TOKEN"
     )
+    # Pass --agents if provided, otherwise fall back to --workers N
+    if [[ -n "$AGENTS_ARG" ]]; then
+      gen_args+=(--agents "$AGENTS_ARG")
+      if [[ -n "$ROLES_ARG" ]]; then
+        gen_args+=(--roles "$ROLES_ARG")
+      fi
+    else
+      gen_args+=(--workers "$WORKERS")
+    fi
     if [[ -n "$BOT_ID" ]]; then
       gen_args+=(--bot-id "$BOT_ID")
     fi
     bun run "$HIVE_DIR/bin/hive-gen-config.ts" "${gen_args[@]}"
   else
-    bun run "$HIVE_DIR/bin/hive-gen-config.ts" \
-      --workers "$WORKERS" \
-      --channel-id "$CHANNEL_ID" \
-      --manager-bot-id "$MANAGER_BOT_ID" \
-      --worker-bot-ids "$WORKER_BOT_IDS" \
-      --tokens-file "$TOKENS_FILE" \
-      --project-repo "$PROJECT_REPO" \
+    local gen_args=(
+      --channel-id "$CHANNEL_ID"
+      --manager-bot-id "$MANAGER_BOT_ID"
+      --worker-bot-ids "$WORKER_BOT_IDS"
+      --tokens-file "$TOKENS_FILE"
+      --project-repo "$PROJECT_REPO"
       --budget "$BUDGET"
+    )
+    if [[ -n "$AGENTS_ARG" ]]; then
+      gen_args+=(--agents "$AGENTS_ARG")
+      if [[ -n "$ROLES_ARG" ]]; then
+        gen_args+=(--roles "$ROLES_ARG")
+      fi
+    else
+      gen_args+=(--workers "$WORKERS")
+    fi
+    bun run "$HIVE_DIR/bin/hive-gen-config.ts" "${gen_args[@]}"
   fi
 }
 
@@ -415,6 +478,47 @@ launch_gateway() {
 }
 
 # ---------------------------------------------------------------------------
+# Compose system prompt for a named agent
+# ---------------------------------------------------------------------------
+
+compose_agent_system_prompt() {
+  local agent_name="$1"
+  local agent_role="$2"
+
+  # a) Base worker prompt with {NAME} and {ROLE} substituted
+  local base_prompt
+  base_prompt="$(sed "s/{NAME}/$agent_name/g; s/{ROLE}/$agent_role/g" "$HIVE_DIR/config/worker-system-prompt.md")"
+
+  # b) Base profile (always included)
+  local base_profile
+  base_profile="$(sed "s/{NAME}/$agent_name/g; s/{ROLE}/$agent_role/g" "$HIVE_DIR/config/profiles/_base.md")"
+
+  # c) Role profile: use if it exists, fall back to _base.md with a warning
+  local role_profile=""
+  local role_profile_path="$HIVE_DIR/config/profiles/${agent_role}.md"
+  if [[ -f "$role_profile_path" ]]; then
+    role_profile="$(sed "s/{NAME}/$agent_name/g; s/{ROLE}/$agent_role/g" "$role_profile_path")"
+  else
+    warn "No profile found for role '${agent_role}' (looked for config/profiles/${agent_role}.md) — using _base.md only"
+  fi
+
+  # d) Memory prompt section (with {NAME} substituted)
+  local memory_section
+  memory_section="$(sed "s/{NAME}/$agent_name/g" "$HIVE_DIR/config/memory-prompt-section.md")"
+
+  # e) Memory restoration block for this agent
+  local memory_block
+  memory_block="$(bun run "$HIVE_DIR/bin/hive-memory.ts" load --agent "$agent_name" 2>/dev/null || echo "## Agent Memory (${agent_name})\nNo prior memory. This is your first session.")"
+
+  # Concatenate all sections
+  printf '%s\n\n%s' "$base_prompt" "$base_profile"
+  if [[ -n "$role_profile" ]]; then
+    printf '\n\n%s' "$role_profile"
+  fi
+  printf '\n\n%s\n\n%s' "$memory_section" "$memory_block"
+}
+
+# ---------------------------------------------------------------------------
 # Launch sessions
 # ---------------------------------------------------------------------------
 
@@ -435,16 +539,21 @@ launch_hive() {
     fi
   fi
 
+  # Read agent list from agents.json
+  local agents_file="$HIVE_DIR/state/agents.json"
+  [[ -f "$agents_file" ]] || die "state/agents.json not found — run config generation first"
+
+  # Build team list for manager init prompt
+  local team_list
+  team_list="$(jq -r '.agents[] | "\(.name) (\(.role))"' "$agents_file" | paste -sd', ')"
+
   local manager_prompt
   manager_prompt="$(cat "$HIVE_DIR/config/manager-system-prompt.md")"
-
-  local worker_count_padded
-  worker_count_padded="$(printf '%02d' "$WORKERS")"
 
   log "Launching manager session ..."
 
   if [[ "$USE_TMUX" == true ]]; then
-    local manager_init="You are the Hive coordinator for project repo: $PROJECT_REPO. You have $WORKERS workers available (worker-01 through worker-$worker_count_padded). Your Discord channel ID is $CHANNEL_ID. You do NOT start work autonomously — wait for the user to tell you what to build. Workers will announce themselves as READY on Discord. When instructed, decompose the project into tasks and assign them to workers."
+    local manager_init="You are the Hive coordinator for project repo: $PROJECT_REPO. Your team: $team_list. Channel ID: $CHANNEL_ID. You do NOT start work autonomously — wait for the user to tell you what to build. Read state/agents.json to learn each agent's name and role. Agents will announce themselves as READY on Discord. When instructed, decompose the project into tasks and assign them to agents by name."
 
     local launch_script="$HIVE_DIR/state/.launch-manager.sh"
     cat > "$launch_script" << LAUNCH_EOF
@@ -472,9 +581,7 @@ LAUNCH_EOF
     tmux send-keys -t hive:manager "$manager_init" Enter
     log "  Manager started in tmux window 'manager'"
   else
-    # Pipe initial prompt via stdin + sleep infinity to keep session alive for Discord push notifications.
-    # -p (print mode) exits after the response — we need sessions to stay alive indefinitely.
-    (echo "You are the Hive coordinator for project repo: $PROJECT_REPO. You have $WORKERS workers available (worker-01 through worker-$worker_count_padded). Your Discord channel ID is $CHANNEL_ID. You do NOT start work autonomously — wait for the user to tell you what to build. Workers will announce themselves as READY on Discord. When instructed, decompose the project into tasks and assign them to workers."; sleep infinity) | \
+    (echo "You are the Hive coordinator for project repo: $PROJECT_REPO. Your team: $team_list. Channel ID: $CHANNEL_ID. You do NOT start work autonomously — wait for the user to tell you what to build. Read state/agents.json to learn each agent's name and role. Agents will announce themselves as READY on Discord. When instructed, decompose the project into tasks and assign them to agents by name."; sleep infinity) | \
     claude --name "hive-manager" \
       --append-system-prompt "$manager_prompt" \
       --mcp-config "$HIVE_DIR/state/manager/mcp-config.json" \
@@ -485,75 +592,92 @@ LAUNCH_EOF
 
   local worker_pids=()
   local started_times=()
+  local agent_names=()
 
-  for i in $(seq 1 "$WORKERS"); do
-    local worker_id
-    worker_id="$(printf '%02d' "$i")"
+  # Iterate over agents from agents.json
+  while IFS= read -r agent_name; do
+    agent_names+=("$agent_name")
+    local agent_role
+    agent_role="$(jq -r ".agents[] | select(.name == \"$agent_name\") | .role // \"developer\"" "$agents_file")"
 
-    local worktree_dir="$HIVE_DIR/worktrees/worker-$worker_id"
+    local worktree_dir="$HIVE_DIR/worktrees/$agent_name"
 
     if [[ ! -d "$worktree_dir" ]]; then
       die "Worktree not found: $worktree_dir — run config generation first"
     fi
 
     if [[ "$USE_TMUX" == true ]]; then
-      local worker_init="You are Hive Worker $worker_id on a team with a coordinator (mention 'manager') and other workers (mention 'worker-01', 'worker-02', etc. or 'all-workers'). Your Discord channel ID is $CHANNEL_ID — always use this numeric ID with Discord tools. You can message any team member by mentioning their name in your Discord message. Announce yourself as READY on Discord and wait for task assignment."
+      local worker_init="You are $agent_name ($agent_role) on a Hive team with a coordinator (mention 'manager') and other agents. Your Discord channel ID is $CHANNEL_ID — always use this numeric ID with Discord tools. You can message any team member by mentioning their name. Announce yourself as READY on Discord and wait for task assignment."
 
-      local worker_launch_script="$HIVE_DIR/state/.launch-worker-$worker_id.sh"
-      cat > "$worker_launch_script" << LAUNCH_EOF
-#!/usr/bin/env bash
-cd "$worktree_dir"
-claude --name "hive-worker-$worker_id" \
-  --append-system-prompt "\$(sed "s/{NN}/$worker_id/g" "$HIVE_DIR/config/worker-system-prompt.md")" \
-  --mcp-config "$HIVE_DIR/state/workers/worker-$worker_id/mcp-config.json" \
-  --strict-mcp-config \
-  --permission-mode bypassPermissions
-LAUNCH_EOF
+      local worker_launch_script="$HIVE_DIR/state/.launch-worker-${agent_name}.sh"
+      # compose_agent_system_prompt writes to stdout; capture it into the launch script
+      local composed_prompt
+      composed_prompt="$(compose_agent_system_prompt "$agent_name" "$agent_role")"
+
+      # Write a launch script that uses the pre-composed prompt (stored as heredoc)
+      {
+        echo '#!/usr/bin/env bash'
+        echo "cd \"$worktree_dir\""
+        echo 'claude --name "hive-'"$agent_name"'" \'
+        echo '  --append-system-prompt "$(cat <<'"'"'__PROMPT_EOF__'"'"'"'
+        echo "$composed_prompt"
+        echo '__PROMPT_EOF__'
+        echo ')" \'
+        echo "  --mcp-config \"$HIVE_DIR/state/workers/$agent_name/mcp-config.json\" \\"
+        echo '  --strict-mcp-config \'
+        echo '  --permission-mode bypassPermissions'
+      } > "$worker_launch_script"
       chmod +x "$worker_launch_script"
 
-      tmux new-window -t hive -n "worker-$worker_id" "$worker_launch_script"
+      tmux new-window -t hive -n "$agent_name" "$worker_launch_script"
       # Wait for Claude to initialize, handle trust prompt if it appears, then send initial prompt
       sleep 5
-      if tmux capture-pane -t "hive:worker-$worker_id" -p 2>/dev/null | grep -qi "trust"; then
-        tmux send-keys -t "hive:worker-$worker_id" "y" Enter
+      if tmux capture-pane -t "hive:$agent_name" -p 2>/dev/null | grep -qi "trust"; then
+        tmux send-keys -t "hive:$agent_name" "y" Enter
         sleep 3
       fi
       sleep 3
-      tmux send-keys -t "hive:worker-$worker_id" "$worker_init" Enter
+      tmux send-keys -t "hive:$agent_name" "$worker_init" Enter
       started_times+=("$(date -u +%Y-%m-%dT%H:%M:%SZ)")
-      log "  Started worker-$worker_id in tmux window 'worker-$worker_id'"
+      log "  Started $agent_name ($agent_role) in tmux window '$agent_name'"
     else
-      local worker_prompt
-      worker_prompt="$(sed "s/{NN}/$worker_id/g" "$HIVE_DIR/config/worker-system-prompt.md")"
+      local worker_init="You are $agent_name ($agent_role) on a Hive team with a coordinator (mention 'manager') and other agents. Your Discord channel ID is $CHANNEL_ID — always use this numeric ID with Discord tools. You can message any team member by mentioning their name. Announce yourself as READY on Discord and wait for task assignment."
+
+      local composed_prompt
+      composed_prompt="$(compose_agent_system_prompt "$agent_name" "$agent_role")"
 
       (cd "$worktree_dir" && \
-      (echo "You are Hive Worker $worker_id on a team with a coordinator (mention 'manager') and other workers (mention 'worker-01', 'worker-02', etc. or 'all-workers'). Your Discord channel ID is $CHANNEL_ID — always use this numeric ID with Discord tools. You can message any team member by mentioning their name in your Discord message. Announce yourself as READY on Discord and wait for task assignment."; sleep infinity) | \
-      claude --name "hive-worker-$worker_id" \
-        --append-system-prompt "$worker_prompt" \
-        --mcp-config "$HIVE_DIR/state/workers/worker-$worker_id/mcp-config.json" \
+      (echo "$worker_init"; sleep infinity) | \
+      claude --name "hive-$agent_name" \
+        --append-system-prompt "$composed_prompt" \
+        --mcp-config "$HIVE_DIR/state/workers/$agent_name/mcp-config.json" \
         --strict-mcp-config \
         --permission-mode bypassPermissions) &
       worker_pids+=($!)
       started_times+=("$(date -u +%Y-%m-%dT%H:%M:%SZ)")
-      log "  Started worker-$worker_id (PID: ${worker_pids[-1]})"
+      log "  Started $agent_name ($agent_role) (PID: ${worker_pids[-1]})"
     fi
 
-    if [[ "$i" -lt "$WORKERS" ]]; then
+    # Stagger agent launches slightly
+    local agent_count_total
+    agent_count_total="$(jq '.agents | length' "$agents_file")"
+    if [[ "${#agent_names[@]}" -lt "$agent_count_total" ]]; then
       sleep 5
     fi
-  done
+  done < <(jq -r '.agents[].name' "$agents_file")
+
+  local total_agents="${#agent_names[@]}"
 
   # -------------------------------------------------------------------------
   # Write state to state/pids.json
   # -------------------------------------------------------------------------
 
   if [[ "$USE_TMUX" == true ]]; then
-    # Tmux mode: write a simple marker instead of PIDs
     local started_ts
     started_ts="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     jq -n \
       --arg started "$started_ts" \
-      --argjson workers "$WORKERS" \
+      --argjson workers "$total_agents" \
       '{ mode: "tmux", session: "hive", started: $started, workers: $workers }' \
       > "$HIVE_DIR/state/pids.json"
   else
@@ -587,13 +711,15 @@ LAUNCH_EOF
     fi
 
     for i in $(seq 0 $(( ${#worker_pids[@]} - 1 ))); do
-      local wid
-      wid="$(printf '%02d' $(( i + 1 )))"
+      local agent_name="${agent_names[$i]}"
+      local agent_role
+      agent_role="$(jq -r ".agents[] | select(.name == \"$agent_name\") | .role // \"developer\"" "$agents_file")"
       pids_json=$(echo "$pids_json" | jq \
-        --arg wid "$wid" \
+        --arg name "$agent_name" \
+        --arg role "$agent_role" \
         --arg wpid "${worker_pids[$i]}" \
         --arg wstarted "${started_times[$i]}" \
-        '.workers += [{ id: $wid, pid: ($wpid | tonumber), name: ("hive-worker-" + $wid), started: $wstarted }]')
+        '.workers += [{ name: $name, role: $role, pid: ($wpid | tonumber), started: $wstarted }]')
     done
 
     echo "$pids_json" > "$HIVE_DIR/state/pids.json"
@@ -616,17 +742,17 @@ LAUNCH_EOF
 
         # Check workers
         if [[ -f "$HIVE_DIR/state/pids.json" ]]; then
-          for entry in $(jq -r '.workers[]? | "\(.id):\(.pid)"' "$HIVE_DIR/state/pids.json" 2>/dev/null); do
-            local wid="${entry%%:*}"
+          for entry in $(jq -r '.workers[]? | "\(.name):\(.pid)"' "$HIVE_DIR/state/pids.json" 2>/dev/null); do
+            local wname="${entry%%:*}"
             local wpid="${entry##*:}"
             if [[ -n "$wpid" ]] && [[ "$wpid" != "null" ]] && ! kill -0 "$wpid" 2>/dev/null; then
               # Worker died — notify Discord
               curl -s -X POST "https://discord.com/api/v10/channels/$CHANNEL_ID/messages" \
                 -H "Authorization: Bot $notify_token" \
                 -H "Content-Type: application/json" \
-                -d "{\"content\": \"WATCHDOG | worker-$wid process (PID $wpid) has died. Task may need reassignment.\"}" > /dev/null 2>&1 || true
+                -d "{\"content\": \"WATCHDOG | $wname process (PID $wpid) has died. Task may need reassignment.\"}" > /dev/null 2>&1 || true
               # Remove from tracking
-              jq "del(.workers[] | select(.id == \"$wid\"))" "$HIVE_DIR/state/pids.json" \
+              jq "del(.workers[] | select(.name == \"$wname\"))" "$HIVE_DIR/state/pids.json" \
                 > "$HIVE_DIR/state/pids.json.tmp" 2>/dev/null \
                 && mv "$HIVE_DIR/state/pids.json.tmp" "$HIVE_DIR/state/pids.json"
             fi
@@ -682,10 +808,10 @@ LAUNCH_EOF
       echo "  Gateway:  tmux window 'gateway' (window 0)"
     fi
     echo "  Manager:  tmux window 'manager'"
-    for i in $(seq 1 "$WORKERS"); do
-      local wid
-      wid="$(printf '%02d' "$i")"
-      echo "  Worker:   tmux window 'worker-$wid'"
+    for aname in "${agent_names[@]}"; do
+      local arole
+      arole="$(jq -r ".agents[] | select(.name == \"$aname\") | .role // \"developer\"" "$agents_file")"
+      echo "  Agent:    tmux window '$aname' ($arole)"
     done
   else
     if [[ "$SINGLE_BOT" == true ]]; then
@@ -695,12 +821,12 @@ LAUNCH_EOF
     worker_pid_list="$(printf '%s, ' "${worker_pids[@]}")"
     worker_pid_list="${worker_pid_list%, }"
     echo "  Manager:  PID $manager_pid"
-    echo "  Workers:  $WORKERS (PIDs: $worker_pid_list)"
+    echo "  Agents:   $total_agents (PIDs: $worker_pid_list)"
     echo "  Watchdog: PID $watchdog_pid"
   fi
 
   echo "  Channel:  $CHANNEL_ID"
-  echo "  Budget:   \$${BUDGET}/worker, \$${MANAGER_BUDGET} manager"
+  echo "  Budget:   \$${BUDGET}/agent, \$${MANAGER_BUDGET} manager"
   echo ""
   echo "  Status:   hive-status.sh"
   echo "  Teardown: hive-launch.sh --teardown"
@@ -711,7 +837,7 @@ LAUNCH_EOF
     log "Hive launched in tmux session 'hive'"
     log "  Ctrl-B 0 -> gateway (single-bot mode only)"
     log "  Ctrl-B 1 -> manager (or 0 if no gateway)"
-    log "  Ctrl-B 2+ -> workers"
+    log "  Ctrl-B 2+ -> agents"
     log "  Ctrl-B d -> detach (sessions keep running)"
     log ""
     tmux attach -t hive

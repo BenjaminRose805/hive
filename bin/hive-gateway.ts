@@ -16,9 +16,11 @@ import {
   Client,
   GatewayIntentBits,
   Partials,
+  EmbedBuilder,
   type Message,
+  type ChatInputCommandInteraction,
 } from 'discord.js'
-import { mkdirSync, existsSync, unlinkSync, readFileSync, writeFileSync, statSync } from 'fs'
+import { mkdirSync, existsSync, unlinkSync, readFileSync, writeFileSync } from 'fs'
 import { join } from 'path'
 
 // ---------------------------------------------------------------------------
@@ -36,6 +38,22 @@ const GATEWAY_DIR = '/tmp/hive-gateway'
 const INBOX_DIR = join(GATEWAY_DIR, 'inbox')
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 const MAX_CHUNK = 2000
+
+// HIVE_ROOT is the project root (directory containing bin/, state/, worktrees/)
+const HIVE_ROOT = import.meta.dir ? join(import.meta.dir, '..') : process.cwd()
+const AGENTS_JSON = join(HIVE_ROOT, 'state', 'agents.json')
+
+// ---------------------------------------------------------------------------
+// Agent process tracking
+// ---------------------------------------------------------------------------
+
+interface AgentProcess {
+  process: ReturnType<typeof Bun.spawn>
+  pid: number
+  startedAt: Date
+}
+
+const agentProcesses = new Map<string, AgentProcess>()
 
 // ---------------------------------------------------------------------------
 // Discord client
@@ -239,6 +257,454 @@ async function routeInbound(msg: Message, excludeSender?: string): Promise<void>
 
   await Promise.allSettled(deliveries)
 }
+
+// ---------------------------------------------------------------------------
+// Slash command handlers
+// ---------------------------------------------------------------------------
+
+interface AgentEntry {
+  name: string
+  role?: string
+  status?: string
+  branch?: string
+  created?: string
+}
+
+interface AgentsJson {
+  agents: AgentEntry[]
+  created?: string
+  mode?: string
+}
+
+function readAgentsJson(): AgentsJson | null {
+  try {
+    if (!existsSync(AGENTS_JSON)) return null
+    return JSON.parse(readFileSync(AGENTS_JSON, 'utf8')) as AgentsJson
+  } catch {
+    return null
+  }
+}
+
+function writeAgentsJson(data: AgentsJson): void {
+  mkdirSync(join(HIVE_ROOT, 'state'), { recursive: true })
+  writeFileSync(AGENTS_JSON, JSON.stringify(data, null, 2))
+}
+
+async function handleSlashStatus(interaction: ChatInputCommandInteraction): Promise<void> {
+  const workerList = [...workers.values()]
+  const embed = new EmbedBuilder()
+    .setTitle('Hive Gateway Status')
+    .setColor(0x5865f2)
+    .addFields(
+      { name: 'Bot', value: client.user?.tag ?? 'unknown', inline: true },
+      { name: 'Registered Workers', value: String(workerList.length), inline: true },
+      { name: 'Spawned Agents', value: String(agentProcesses.size), inline: true },
+    )
+    .setTimestamp()
+
+  if (workerList.length > 0) {
+    const workerSummary = workerList
+      .map((w) => `• \`${w.workerId}\` — channel \`${w.channelId}\``)
+      .join('\n')
+    embed.addFields({ name: 'Workers', value: workerSummary.slice(0, 1024) })
+  }
+
+  if (agentProcesses.size > 0) {
+    const agentSummary = [...agentProcesses.entries()]
+      .map(([name, ap]) => `• \`${name}\` — PID ${ap.pid}, started ${ap.startedAt.toISOString()}`)
+      .join('\n')
+    embed.addFields({ name: 'Running Agents', value: agentSummary.slice(0, 1024) })
+  }
+
+  await interaction.reply({ embeds: [embed], ephemeral: false })
+}
+
+async function handleSlashAgents(interaction: ChatInputCommandInteraction): Promise<void> {
+  const data = readAgentsJson()
+  if (!data || data.agents.length === 0) {
+    await interaction.reply({ content: 'No agents registered in `state/agents.json`.', ephemeral: true })
+    return
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle('Hive Agents')
+    .setColor(0x57f287)
+    .setTimestamp()
+
+  if (data.mode) embed.addFields({ name: 'Mode', value: data.mode, inline: true })
+
+  const agentLines = data.agents.map((a) => {
+    const running = agentProcesses.has(a.name) ? ' [running]' : ''
+    const role = a.role ? ` (${a.role})` : ''
+    const status = a.status ?? 'unknown'
+    return `• \`${a.name}\`${role} — ${status}${running}`
+  })
+
+  embed.addFields({ name: `Agents (${data.agents.length})`, value: agentLines.join('\n').slice(0, 1024) })
+
+  await interaction.reply({ embeds: [embed] })
+}
+
+async function handleSlashBroadcast(interaction: ChatInputCommandInteraction): Promise<void> {
+  const message = interaction.options.getString('message', true)
+
+  if (workers.size === 0) {
+    await interaction.reply({ content: 'No registered workers to broadcast to.', ephemeral: true })
+    return
+  }
+
+  await interaction.deferReply()
+
+  const payload = {
+    content: message,
+    chat_id: interaction.channelId,
+    message_id: interaction.id,
+    user: interaction.user.username,
+    user_id: interaction.user.id,
+    ts: new Date().toISOString(),
+    attachments: [],
+  }
+
+  const results: string[] = []
+  for (const worker of workers.values()) {
+    try {
+      const res = await fetch('http://localhost/inbound', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+        unix: worker.endpoint,
+      } as any)
+      results.push(`\`${worker.workerId}\`: ${res.ok ? 'delivered' : `HTTP ${res.status}`}`)
+    } catch (err) {
+      results.push(`\`${worker.workerId}\`: failed (${err instanceof Error ? err.message : String(err)})`)
+    }
+  }
+
+  await interaction.editReply({
+    content: `Broadcast sent to ${workers.size} worker(s):\n${results.join('\n')}`,
+  })
+}
+
+async function handleSlashAsk(interaction: ChatInputCommandInteraction): Promise<void> {
+  const agentName = interaction.options.getString('agent', true)
+  const message = interaction.options.getString('message', true)
+
+  const worker = workers.get(agentName)
+  if (!worker) {
+    await interaction.reply({
+      content: `Agent \`${agentName}\` is not registered. Use \`/agents\` to see registered agents.`,
+      ephemeral: true,
+    })
+    return
+  }
+
+  await interaction.deferReply()
+
+  const payload = {
+    content: message,
+    chat_id: interaction.channelId,
+    message_id: interaction.id,
+    user: interaction.user.username,
+    user_id: interaction.user.id,
+    ts: new Date().toISOString(),
+    attachments: [],
+  }
+
+  try {
+    const res = await fetch('http://localhost/inbound', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      unix: worker.endpoint,
+    } as any)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    await interaction.editReply({ content: `Message delivered to \`${agentName}\`.` })
+  } catch (err) {
+    await interaction.editReply({
+      content: `Failed to deliver to \`${agentName}\`: ${err instanceof Error ? err.message : String(err)}`,
+    })
+  }
+}
+
+async function handleSlashMemory(interaction: ChatInputCommandInteraction): Promise<void> {
+  const agentName = interaction.options.getString('agent', true)
+
+  await interaction.deferReply()
+
+  try {
+    const proc = Bun.spawn(
+      ['bun', 'run', join(HIVE_ROOT, 'bin', 'hive-memory.ts'), 'view', '--agent', agentName],
+      { cwd: HIVE_ROOT, stdout: 'pipe', stderr: 'pipe' },
+    )
+    const output = await new Response(proc.stdout).text()
+    const errout = await new Response(proc.stderr).text()
+    const combined = (output + errout).trim() || '(no memory output)'
+    // Discord message limit is 2000 chars; truncate if needed
+    const truncated = combined.length > 1900 ? combined.slice(0, 1900) + '\n…(truncated)' : combined
+    await interaction.editReply({ content: `**Memory for \`${agentName}\`:**\n\`\`\`\n${truncated}\n\`\`\`` })
+  } catch (err) {
+    await interaction.editReply({
+      content: `Failed to read memory for \`${agentName}\`: ${err instanceof Error ? err.message : String(err)}`,
+    })
+  }
+}
+
+async function handleSlashAssign(interaction: ChatInputCommandInteraction): Promise<void> {
+  const agentName = interaction.options.getString('agent', true)
+  const task = interaction.options.getString('task', true)
+
+  const worker = workers.get(agentName)
+  if (!worker) {
+    await interaction.reply({
+      content: `Agent \`${agentName}\` is not registered. Use \`/agents\` to see registered agents.`,
+      ephemeral: true,
+    })
+    return
+  }
+
+  await interaction.deferReply()
+
+  // Format as TASK_ASSIGN protocol message
+  const taskMessage = [
+    `TYPE: TASK_ASSIGN`,
+    `FROM: manager`,
+    `TO: ${agentName}`,
+    `TASK: ${task}`,
+    `TS: ${new Date().toISOString()}`,
+  ].join('\n')
+
+  const payload = {
+    content: taskMessage,
+    chat_id: interaction.channelId,
+    message_id: interaction.id,
+    user: interaction.user.username,
+    user_id: interaction.user.id,
+    ts: new Date().toISOString(),
+    attachments: [],
+  }
+
+  try {
+    const res = await fetch('http://localhost/inbound', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      unix: worker.endpoint,
+    } as any)
+    if (!res.ok) throw new Error(`HTTP ${res.status}`)
+    await interaction.editReply({ content: `Task assigned to \`${agentName}\`:\n> ${task}` })
+  } catch (err) {
+    await interaction.editReply({
+      content: `Failed to assign task to \`${agentName}\`: ${err instanceof Error ? err.message : String(err)}`,
+    })
+  }
+}
+
+async function handleSlashSpinUp(interaction: ChatInputCommandInteraction): Promise<void> {
+  const agentName = interaction.options.getString('name', true)
+  const role = interaction.options.getString('role') ?? 'developer'
+
+  // Defer immediately — startup takes time
+  await interaction.deferReply()
+
+  try {
+    // Check if already running
+    if (agentProcesses.has(agentName)) {
+      await interaction.editReply({ content: `Agent \`${agentName}\` is already running.` })
+      return
+    }
+
+    // Read agents.json to find agent config
+    const agentsData = readAgentsJson()
+    const agentEntry = agentsData?.agents.find((a) => a.name === agentName)
+
+    // Create worktree directory
+    const worktreeDir = join(HIVE_ROOT, 'worktrees', agentName)
+    mkdirSync(worktreeDir, { recursive: true })
+
+    // Compose system prompt
+    let systemPrompt = `You are a Hive agent named ${agentName} with role: ${role}.\n`
+    systemPrompt += `You operate in a git worktree at: ${worktreeDir}\n`
+    systemPrompt += `Communicate via Discord. Your worker ID is: ${agentName}\n`
+
+    // Append role profile if available
+    const profilePath = join(HIVE_ROOT, 'config', 'profiles', `${role}.md`)
+    const basePath = join(HIVE_ROOT, 'config', 'profiles', '_base.md')
+    if (existsSync(profilePath)) {
+      systemPrompt += '\n' + readFileSync(profilePath, 'utf8')
+    } else if (existsSync(basePath)) {
+      systemPrompt += '\n' + readFileSync(basePath, 'utf8')
+    }
+
+    // Build MCP config path (reuse existing worker config if present)
+    const mcpConfigPath = join(HIVE_ROOT, 'state', 'workers', agentName, 'mcp-config.json')
+
+    const spawnArgs: string[] = [
+      'claude',
+      '--name', `hive-${agentName}`,
+      '--append-system-prompt', systemPrompt,
+    ]
+
+    if (existsSync(mcpConfigPath)) {
+      spawnArgs.push('--mcp-config', mcpConfigPath)
+    }
+
+    spawnArgs.push('--permission-mode', 'bypassPermissions')
+
+    const proc = Bun.spawn(spawnArgs, {
+      cwd: worktreeDir,
+      stdin: 'pipe',
+      stdout: 'inherit',
+      stderr: 'inherit',
+    })
+
+    agentProcesses.set(agentName, {
+      process: proc,
+      pid: proc.pid,
+      startedAt: new Date(),
+    })
+
+    // Update agents.json status
+    if (agentsData) {
+      if (agentEntry) {
+        agentEntry.status = 'running'
+      } else {
+        agentsData.agents.push({
+          name: agentName,
+          role,
+          status: 'running',
+          created: new Date().toISOString(),
+        })
+      }
+      writeAgentsJson(agentsData)
+    } else {
+      // Create agents.json from scratch
+      writeAgentsJson({
+        agents: [{ name: agentName, role, status: 'running', created: new Date().toISOString() }],
+        created: new Date().toISOString(),
+        mode: 'single-bot',
+      })
+    }
+
+    const embed = new EmbedBuilder()
+      .setTitle('Agent Spawned')
+      .setColor(0x57f287)
+      .addFields(
+        { name: 'Name', value: agentName, inline: true },
+        { name: 'Role', value: role, inline: true },
+        { name: 'PID', value: String(proc.pid), inline: true },
+        { name: 'Worktree', value: worktreeDir },
+      )
+      .setTimestamp()
+
+    await interaction.editReply({ embeds: [embed] })
+
+    // Clean up tracking when process exits
+    proc.exited.then(() => {
+      agentProcesses.delete(agentName)
+      const d = readAgentsJson()
+      if (d) {
+        const entry = d.agents.find((a) => a.name === agentName)
+        if (entry) entry.status = 'stopped'
+        writeAgentsJson(d)
+      }
+    }).catch(() => {})
+
+  } catch (err) {
+    await interaction.editReply({
+      content: `Failed to spin up \`${agentName}\`: ${err instanceof Error ? err.message : String(err)}`,
+    })
+  }
+}
+
+async function handleSlashTearDown(interaction: ChatInputCommandInteraction): Promise<void> {
+  const agentName = interaction.options.getString('name', true)
+
+  const tracked = agentProcesses.get(agentName)
+  if (!tracked) {
+    await interaction.reply({
+      content: `Agent \`${agentName}\` is not currently running (no tracked process).`,
+      ephemeral: true,
+    })
+    return
+  }
+
+  await interaction.deferReply()
+
+  try {
+    tracked.process.kill('SIGTERM')
+    agentProcesses.delete(agentName)
+
+    // Deregister from workers map if present
+    workers.delete(agentName)
+
+    // Update agents.json
+    const data = readAgentsJson()
+    if (data) {
+      const entry = data.agents.find((a) => a.name === agentName)
+      if (entry) entry.status = 'stopped'
+      writeAgentsJson(data)
+    }
+
+    await interaction.editReply({ content: `Agent \`${agentName}\` (PID ${tracked.pid}) has been sent SIGTERM.` })
+  } catch (err) {
+    await interaction.editReply({
+      content: `Failed to tear down \`${agentName}\`: ${err instanceof Error ? err.message : String(err)}`,
+    })
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Interaction handler (slash commands)
+// ---------------------------------------------------------------------------
+
+client.on('interactionCreate', async (interaction) => {
+  if (!interaction.isChatInputCommand()) return
+
+  try {
+    switch (interaction.commandName) {
+      case 'status':
+        await handleSlashStatus(interaction)
+        break
+      case 'agents':
+        await handleSlashAgents(interaction)
+        break
+      case 'broadcast':
+        await handleSlashBroadcast(interaction)
+        break
+      case 'ask':
+        await handleSlashAsk(interaction)
+        break
+      case 'memory':
+        await handleSlashMemory(interaction)
+        break
+      case 'assign':
+        await handleSlashAssign(interaction)
+        break
+      case 'spin-up':
+        await handleSlashSpinUp(interaction)
+        break
+      case 'tear-down':
+        await handleSlashTearDown(interaction)
+        break
+      default:
+        if (interaction.isRepliable()) {
+          await interaction.reply({ content: `Unknown command: \`/${interaction.commandName}\``, ephemeral: true })
+        }
+    }
+  } catch (err) {
+    process.stderr.write(`hive-gateway: interaction handler error: ${err}\n`)
+    try {
+      if (interaction.isRepliable()) {
+        const msg = `An error occurred: ${err instanceof Error ? err.message : String(err)}`
+        if (interaction.deferred || interaction.replied) {
+          await interaction.editReply({ content: msg })
+        } else {
+          await interaction.reply({ content: msg, ephemeral: true })
+        }
+      }
+    } catch {}
+  }
+})
 
 // ---------------------------------------------------------------------------
 // HTTP request helpers
