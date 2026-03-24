@@ -1,0 +1,5 @@
+{
+  "role": "security-reviewer",
+  "description": "Security reviewer — docs, HTTP, CVE/advisory web search, and GitHub",
+  "tools": ["context7", "fetch", "web-search", "github"]
+}

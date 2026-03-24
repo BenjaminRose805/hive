@@ -1,0 +1,10 @@
+{
+  "name": "github",
+  "description": "GitHub API for PRs, issues, code review, and repository operations",
+  "command": "npx",
+  "args": ["-y", "@anthropic/mcp-server-github"],
+  "env": {
+    "GITHUB_TOKEN": "${GITHUB_TOKEN}"
+  },
+  "requiredEnv": ["GITHUB_TOKEN"]
+}

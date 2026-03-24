@@ -1,14 +1,20 @@
 {
   "name": "hive",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Discord multi-session Claude Code orchestrator",
   "type": "module",
   "scripts": {
-    "gen-config": "bun run bin/hive-gen-config.ts"
+    "hive": "bun run bin/hive",
+    "gateway": "bun run bin/hive-gateway.ts",
+    "mind": "bun run bin/hive-mind.ts",
+    "validate": "bun run bin/hive validate"
   },
   "dependencies": {
     "@discordjs/rest": "^2.3.0",
     "discord-api-types": "^0.37.83",
     "discord.js": "^14.14.0"
+  },
+  "devDependencies": {
+    "bun-types": "latest"
   }
 }

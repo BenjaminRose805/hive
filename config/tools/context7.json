@@ -1,0 +1,8 @@
+{
+  "name": "context7",
+  "description": "Library and framework documentation lookup via Context7",
+  "command": "npx",
+  "args": ["-y", "@upwindio/context7-mcp@latest"],
+  "env": {},
+  "requiredEnv": []
+}

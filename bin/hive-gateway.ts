@@ -20,8 +20,14 @@ import {
   type Message,
   type ChatInputCommandInteraction,
 } from 'discord.js'
-import { mkdirSync, existsSync, unlinkSync, readFileSync, writeFileSync } from 'fs'
+import { mkdirSync, existsSync, unlinkSync, readFileSync, writeFileSync, renameSync } from 'fs'
 import { join } from 'path'
+import type { DeltaFile } from '../src/mind/mind-types.ts'
+import { parseHeader, parseBody, extractAgentsList } from '../src/gateway/protocol-parser.ts'
+import { ThreadManager } from '../src/gateway/thread-manager.ts'
+import { shouldDeliver, type WorkerInfo } from '../src/gateway/selective-router.ts'
+import { MessageType } from '../src/gateway/types.ts'
+import type { AgentEntry, AgentsJson } from '../src/shared/agent-types.ts'
 
 // ---------------------------------------------------------------------------
 // Config
@@ -42,6 +48,7 @@ const MAX_CHUNK = 2000
 // HIVE_ROOT is the project root (directory containing bin/, state/, worktrees/)
 const HIVE_ROOT = import.meta.dir ? join(import.meta.dir, '..') : process.cwd()
 const AGENTS_JSON = join(HIVE_ROOT, 'state', 'agents.json')
+const threadManager = new ThreadManager(HIVE_ROOT)
 
 // ---------------------------------------------------------------------------
 // Agent process tracking
@@ -184,11 +191,26 @@ client.on('messageCreate', (msg) => {
   )
 })
 
+client.on('threadDelete', (thread) => {
+  // Clean up any thread mappings when a thread is externally deleted
+  const allMappings = threadManager.getAll()
+  for (const mapping of allMappings) {
+    if (mapping.threadId === thread.id) {
+      threadManager.removeThread(mapping.taskId)
+      process.stderr.write(`hive-gateway: cleaned up thread mapping for ${mapping.taskId} (thread deleted)\n`)
+    }
+  }
+})
+
 async function routeInbound(msg: Message, excludeSender?: string): Promise<void> {
   // Resolve effective channel ID — threads inherit parent's channel
   const effectiveChannelId = msg.channel.isThread()
     ? msg.channel.parentId ?? msg.channelId
     : msg.channelId
+
+  // Parse protocol header for selective routing
+  const parsed = parseHeader(msg.content)
+  const bodyAgents = parsed ? extractAgentsList(msg.content) : undefined
 
   const targets: WorkerEntry[] = []
 
@@ -199,11 +221,16 @@ async function routeInbound(msg: Message, excludeSender?: string): Promise<void>
     // Skip the sender to avoid echo loops
     if (excludeSender && worker.workerId === excludeSender) continue
 
-    // Mention gate
-    if (worker.requireMention) {
+    // Mention gate — only for non-protocol messages from humans (no excludeSender)
+    if (worker.requireMention && !parsed) {
       const mentioned = await isMentioned(msg, worker.mentionPatterns)
       if (!mentioned) continue
     }
+
+    // Selective routing filter
+    const workerInfo: WorkerInfo = { workerId: worker.workerId, channelId: worker.channelId }
+    const decision = shouldDeliver(parsed, workerInfo, msg.content, bodyAgents)
+    if (!decision.deliver) continue
 
     targets.push(worker)
   }
@@ -261,20 +288,6 @@ async function routeInbound(msg: Message, excludeSender?: string): Promise<void>
 // ---------------------------------------------------------------------------
 // Slash command handlers
 // ---------------------------------------------------------------------------
-
-interface AgentEntry {
-  name: string
-  role?: string
-  status?: string
-  branch?: string
-  created?: string
-}
-
-interface AgentsJson {
-  agents: AgentEntry[]
-  created?: string
-  mode?: string
-}
 
 function readAgentsJson(): AgentsJson | null {
   try {
@@ -433,7 +446,7 @@ async function handleSlashMemory(interaction: ChatInputCommandInteraction): Prom
 
   try {
     const proc = Bun.spawn(
-      ['bun', 'run', join(HIVE_ROOT, 'bin', 'hive-memory.ts'), 'view', '--agent', agentName],
+      ['bun', 'run', join(HIVE_ROOT, 'bin', 'hive-mind.ts'), 'view', '--agent', agentName],
       { cwd: HIVE_ROOT, stdout: 'pipe', stderr: 'pipe' },
     )
     const output = await new Response(proc.stdout).text()
@@ -466,16 +479,30 @@ async function handleSlashAssign(interaction: ChatInputCommandInteraction): Prom
 
   // Format as TASK_ASSIGN protocol message (pipe-delimited per config/protocol.md)
   const taskId = `task-${Date.now().toString(36)}`
+  const files = interaction.options.getString('files') ?? ''
   const taskMessage = [
     `TASK_ASSIGN | ${agentName} | ${taskId}`,
     `Branch: hive/${agentName}`,
+    `Files: ${files}`,
     `Description: ${task}`,
     `Dependencies: none`,
   ].join('\n')
 
+  // Create a task thread so the worker's replies land there (mirrors handleSend logic)
+  let chatId = interaction.channelId
+  try {
+    const mainChannel = await fetchTextChannel(interaction.channelId)
+    if ('threads' in mainChannel) {
+      const threadId = await threadManager.createTaskThread(mainChannel, agentName, taskId)
+      chatId = threadId
+    }
+  } catch (err) {
+    process.stderr.write(`hive-gateway: thread creation failed for ${taskId}, using main channel: ${err}\n`)
+  }
+
   const payload = {
     content: taskMessage,
-    chat_id: interaction.channelId,
+    chat_id: chatId,
     message_id: interaction.id,
     user: interaction.user.username,
     user_id: interaction.user.id,
@@ -522,7 +549,7 @@ async function handleSlashSpinUp(interaction: ChatInputCommandInteraction): Prom
     mkdirSync(worktreeDir, { recursive: true })
 
     // Compose system prompt from worker-system-prompt.md + profiles + memory
-    const workerPromptPath = join(HIVE_ROOT, 'config', 'worker-system-prompt.md')
+    const workerPromptPath = join(HIVE_ROOT, 'config', 'prompts', 'worker-system-prompt.md')
     let systemPrompt = existsSync(workerPromptPath)
       ? readFileSync(workerPromptPath, 'utf8')
           .replace(/\{NAME\}/g, agentName)
@@ -530,8 +557,8 @@ async function handleSlashSpinUp(interaction: ChatInputCommandInteraction): Prom
       : `You are a Hive agent named ${agentName} with role: ${role}.\nYour branch is hive/${agentName}.\n`
 
     // Append base profile (always) + role profile (if exists, else warn)
-    const basePath = join(HIVE_ROOT, 'config', 'profiles', '_base.md')
-    const profilePath = join(HIVE_ROOT, 'config', 'profiles', `${role}.md`)
+    const basePath = join(HIVE_ROOT, 'config', 'prompts', 'profiles', '_base.md')
+    const profilePath = join(HIVE_ROOT, 'config', 'prompts', 'profiles', `${role}.md`)
     if (existsSync(basePath)) {
       systemPrompt += '\n\n' + readFileSync(basePath, 'utf8').replace(/\{NAME\}/g, agentName)
     }
@@ -539,11 +566,18 @@ async function handleSlashSpinUp(interaction: ChatInputCommandInteraction): Prom
       systemPrompt += '\n\n' + readFileSync(profilePath, 'utf8')
     }
 
-    // Append memory prompt section + memory restoration
-    const memoryPromptPath = join(HIVE_ROOT, 'config', 'memory-prompt-section.md')
-    if (existsSync(memoryPromptPath)) {
-      systemPrompt += '\n\n' + readFileSync(memoryPromptPath, 'utf8').replace(/\{NAME\}/g, agentName)
+    // Append mind prompt section
+    const mindPromptPath = join(HIVE_ROOT, 'config', 'prompts', 'mind-prompt-section.md')
+    if (existsSync(mindPromptPath)) {
+      systemPrompt += '\n\n' + readFileSync(mindPromptPath, 'utf8').replace(/\{NAME\}/g, agentName)
     }
+    // Append live mind state (context, inbox summary, watches)
+    try {
+      const mindLoad = Bun.spawnSync(['bun', 'run', join(HIVE_ROOT, 'bin/hive-mind.ts'), 'load', '--agent', agentName])
+      if (mindLoad.exitCode === 0 && mindLoad.stdout.toString().trim()) {
+        systemPrompt += '\n\n' + mindLoad.stdout.toString()
+      }
+    } catch { /* mind not available yet, continue without */ }
 
     // Build MCP config path (reuse existing worker config if present)
     const mcpConfigPath = join(HIVE_ROOT, 'state', 'workers', agentName, 'mcp-config.json')
@@ -626,6 +660,26 @@ async function handleSlashSpinUp(interaction: ChatInputCommandInteraction): Prom
   }
 }
 
+async function handleSlashThreads(interaction: ChatInputCommandInteraction): Promise<void> {
+  const mappings = threadManager.getAll()
+  if (mappings.length === 0) {
+    await interaction.reply({ content: 'No active task threads.', ephemeral: true })
+    return
+  }
+
+  const embed = new EmbedBuilder()
+    .setTitle('Active Task Threads')
+    .setColor(0x5865f2)
+    .setTimestamp()
+
+  const lines = mappings.map(m =>
+    `• \`${m.taskId}\` → <#${m.threadId}> (${m.agent}, ${m.createdAt})`
+  )
+  embed.addFields({ name: `Threads (${mappings.length})`, value: lines.join('\n').slice(0, 1024) })
+
+  await interaction.reply({ embeds: [embed] })
+}
+
 async function handleSlashTearDown(interaction: ChatInputCommandInteraction): Promise<void> {
   const agentName = interaction.options.getString('name', true)
 
@@ -696,6 +750,9 @@ client.on('interactionCreate', async (interaction) => {
       case 'tear-down':
         await handleSlashTearDown(interaction)
         break
+      case 'threads':
+        await handleSlashThreads(interaction)
+        break
       default:
         if (interaction.isRepliable()) {
           await interaction.reply({ content: `Unknown command: \`/${interaction.commandName}\``, ephemeral: true })
@@ -741,6 +798,35 @@ function jsonErr(error: string, status = 500): Response {
 // Route handlers
 // ---------------------------------------------------------------------------
 
+/** Auto-register a Hive Mind watch on behalf of a worker when TASK_ASSIGN has Dependencies */
+function autoRegisterWatch(agent: string, topic: string): void {
+  const delta: DeltaFile = {
+    agent,
+    action: 'register-watch',
+    target_type: 'contract',
+    target_topic: topic,
+    watch: {
+      topic,
+      type: 'contract',
+      status: 'waiting',
+      since: new Date().toISOString(),
+      default_action: `proceed with last known version of ${topic}`,
+    },
+  }
+  const filename = `${Date.now()}-${agent}-auto-watch-${topic}.json`
+  const pendingDir = join(HIVE_ROOT, '.hive', 'mind', 'pending')
+  const tmpPath = join(pendingDir, `.tmp-${crypto.randomUUID()}.json`)
+  const finalPath = join(pendingDir, filename)
+  try {
+    mkdirSync(pendingDir, { recursive: true })
+    writeFileSync(tmpPath, JSON.stringify(delta, null, 2))
+    renameSync(tmpPath, finalPath)
+    process.stderr.write(`hive-gateway: auto-watch registered for ${agent} on topic ${topic}\n`)
+  } catch (err) {
+    process.stderr.write(`hive-gateway: auto-watch failed for ${agent}/${topic}: ${err}\n`)
+  }
+}
+
 async function handleRegister(req: Request): Promise<Response> {
   const body = await readJson(req)
   const workerId = body.workerId as string
@@ -768,13 +854,93 @@ async function handleDeregister(req: Request): Promise<Response> {
   return jsonOk()
 }
 
+function writeScopeFile(agent: string, taskId: string, allowed: string[]): void {
+  const scope = {
+    agent,
+    taskId,
+    allowed,
+    shared: ['package.json', 'tsconfig.json', '*.lock', '.hive/**', '.omc/**', 'node_modules/**'],
+    createdAt: new Date().toISOString(),
+  }
+  const scopeDir = join(HIVE_ROOT, '.hive', 'scope')
+  mkdirSync(scopeDir, { recursive: true })
+  const tmpPath = join(scopeDir, `.tmp-${crypto.randomUUID()}.json`)
+  const finalPath = join(scopeDir, `${agent}.json`)
+  writeFileSync(tmpPath, JSON.stringify(scope, null, 2))
+  renameSync(tmpPath, finalPath)
+  process.stderr.write(`hive-gateway: scope file written for ${agent} (${allowed.length} patterns)\n`)
+}
+
 async function handleSend(req: Request): Promise<Response> {
   const body = await readJson(req)
-  const chatId = body.chat_id as string
+  let chatId = body.chat_id as string
   const text = body.text as string
   const replyTo = body.reply_to as string | undefined
   const files = (body.files as string[] | undefined) ?? []
   const sender = body.sender as string | undefined
+  const originalChatId = chatId
+
+  const parsed = parseHeader(text)
+
+  // TASK_ASSIGN: create thread, redirect message there
+  if (parsed?.type === MessageType.TASK_ASSIGN && parsed.target && parsed.taskId) {
+    try {
+      const mainChannel = await fetchTextChannel(chatId)
+      if ('threads' in mainChannel) {
+        const threadId = await threadManager.createTaskThread(mainChannel, parsed.target, parsed.taskId)
+        chatId = threadId  // send TASK_ASSIGN into the thread
+      }
+    } catch (err) {
+      process.stderr.write(`hive-gateway: thread creation failed for ${parsed.taskId}, using main channel: ${err}\n`)
+    }
+  }
+
+  // Auto-register watches for dependencies listed in TASK_ASSIGN
+  if (parsed?.type === MessageType.TASK_ASSIGN && parsed.target) {
+    const body = parseBody(text)
+    const deps = body.dependencies
+    if (deps && deps !== 'none') {
+      const topics = deps.split(',').map((d: string) => d.trim()).filter(Boolean)
+      for (const topic of topics) {
+        autoRegisterWatch(parsed.target, topic)
+      }
+    }
+  }
+
+  // Write scope file for the target agent
+  if (parsed?.type === MessageType.TASK_ASSIGN && parsed.target && parsed.taskId) {
+    const taskBody = parseBody(text)
+    const filesField = taskBody.files
+    if (filesField) {
+      const allowed = filesField.split(',').map((f: string) => {
+        const trimmed = f.trim()
+        return trimmed.endsWith('/') ? trimmed + '**' : trimmed
+      }).filter(Boolean)
+      writeScopeFile(parsed.target, parsed.taskId, allowed)
+    }
+  }
+
+  // Resolve chat_id='auto' to the target agent's thread or channel (daemon push)
+  const targetAgent = body.target_agent as string | undefined
+  if (chatId === 'auto' && targetAgent) {
+    const allThreads = threadManager.getAll()
+    let resolved = false
+    for (const mapping of allThreads) {
+      if (mapping.agent === targetAgent) {
+        chatId = mapping.threadId
+        resolved = true
+        break
+      }
+    }
+    if (!resolved) {
+      const worker = workers.get(targetAgent)
+      if (worker?.channelId) {
+        chatId = worker.channelId
+      } else {
+        return jsonErr(`Cannot resolve channel for agent: ${targetAgent}`, 400)
+      }
+    }
+  }
 
   const ch = await fetchTextChannel(chatId)
   if (!('send' in ch)) throw new Error('channel is not sendable')
@@ -806,6 +972,39 @@ async function handleSend(req: Request): Promise<Response> {
       return jsonErr(
         `reply failed after ${sentIds.length} of ${chunks.length} chunks: ${msg}`,
       )
+    }
+  }
+
+  // COMPLETE: post embed summary to main channel (after the normal send)
+  if (parsed?.type === MessageType.COMPLETE && parsed.taskId) {
+    const parsedBody = parseBody(text)
+    const threadId = threadManager.getThread(parsed.taskId)
+    if (threadId) {
+      try {
+        // Find the main channel from the sending worker's registration
+        const workerEntry = sender ? workers.get(sender) : undefined
+        const mainChannelId = workerEntry?.channelId ?? originalChatId
+        if (mainChannelId && mainChannelId !== threadId) {
+          const mainChannel = await fetchTextChannel(mainChannelId)
+          if ('send' in mainChannel) {
+            const embed = new EmbedBuilder()
+              .setTitle(`Task Complete: ${parsed.taskId}`)
+              .setColor(0x57f287)
+              .addFields(
+                { name: 'Agent', value: parsed.sender, inline: true },
+                { name: 'Task', value: parsed.taskId, inline: true },
+              )
+              .setTimestamp()
+            if (parsedBody.branch) {
+              embed.addFields({ name: 'Branch', value: parsedBody.branch, inline: true })
+            }
+            embed.addFields({ name: 'Thread', value: `<#${threadId}>` })
+            await mainChannel.send({ embeds: [embed] })
+          }
+        }
+      } catch (err) {
+        process.stderr.write(`hive-gateway: failed to post COMPLETE embed: ${err}\n`)
+      }
     }
   }
 

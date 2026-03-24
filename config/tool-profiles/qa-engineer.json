@@ -1,0 +1,5 @@
+{
+  "role": "qa-engineer",
+  "description": "QA engineer — docs, HTTP, browser automation, and GitHub",
+  "tools": ["context7", "fetch", "puppeteer", "github"]
+}

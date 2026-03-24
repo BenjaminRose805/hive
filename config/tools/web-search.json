@@ -1,0 +1,10 @@
+{
+  "name": "web-search",
+  "description": "Web search via Brave Search API",
+  "command": "npx",
+  "args": ["-y", "@anthropic/mcp-server-brave-search"],
+  "env": {
+    "BRAVE_API_KEY": "${BRAVE_API_KEY}"
+  },
+  "requiredEnv": ["BRAVE_API_KEY"]
+}

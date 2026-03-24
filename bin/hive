@@ -1,0 +1,66 @@
+#!/usr/bin/env bun
+/**
+ * bin/hive — Unified CLI for the Hive orchestrator
+ */
+
+import { resolve, join } from 'path'
+
+const HIVE_DIR = resolve(import.meta.dir, '..')
+const args = process.argv.slice(2)
+const subcommand = args[0]
+const subArgs = args.slice(1)
+
+switch (subcommand) {
+  case 'launch':
+  case 'teardown':
+  case 'status':
+  case 'integrate': {
+    const scriptMap: Record<string, string> = {
+      launch: 'launch.sh',
+      teardown: 'launch.sh',
+      status: 'status.sh',
+      integrate: 'integrate.sh',
+    }
+    const script = join(HIVE_DIR, 'src', 'scripts', scriptMap[subcommand])
+    const shellArgs = subcommand === 'teardown' ? ['--teardown', ...subArgs] : subArgs
+    const result = Bun.spawnSync(['bash', script, ...shellArgs], {
+      cwd: HIVE_DIR,
+      env: { ...process.env, HIVE_DIR },
+      stdio: ['inherit', 'inherit', 'inherit'],
+    })
+    process.exit(result.exitCode ?? 1)
+  }
+  case 'gen-config': {
+    const mod = await import('../src/gen-config.ts')
+    await mod.main(subArgs)
+    break
+  }
+  case 'validate': {
+    const mod = await import('../src/validate-tools.ts')
+    await mod.main(subArgs)
+    break
+  }
+  case 'register-commands': {
+    const mod = await import('../src/register-commands.ts')
+    await mod.main(subArgs)
+    break
+  }
+  default:
+    console.log(`hive — Discord multi-session Claude Code orchestrator
+
+Usage: hive <command> [options]
+
+Commands:
+  launch              Launch a full Hive swarm (manager + N workers)
+  teardown            Stop all running sessions
+  status              Check process and branch status
+  integrate           Merge completed worker branches
+  gen-config          Generate per-worker configuration files
+  validate            Validate MCP tool configurations
+  register-commands   Register Discord slash commands
+
+Daemons (separate processes):
+  bin/hive-gateway.ts    Discord gateway (started by launch)
+  bin/hive-mind.ts       Agent CLI (+ daemon subcommand)
+`)
+}

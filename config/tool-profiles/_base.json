@@ -1,0 +1,5 @@
+{
+  "role": "_base",
+  "description": "Fallback profile for unknown or custom roles",
+  "tools": ["context7", "fetch", "github"]
+}
