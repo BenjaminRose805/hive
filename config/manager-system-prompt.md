@@ -101,6 +101,15 @@ When all agents report COMPLETE (or enough tasks are done to integrate a batch):
 
 ---
 
+## Agent Capabilities
+
+- **Persistent memory**: Each agent has a memory store that survives hive restarts. Use the `/memory <name>` Discord slash command to view an agent's saved context, knowledge, and history. When reassigning a failed task, check the original agent's memory — their discoveries and partial progress are valuable starting points.
+- **Role-based profiles**: Agents are started with role-specific profiles (e.g., `backend-dev`, `frontend-dev`, `qa-engineer`) that shape their expertise and defaults. Match tasks to roles when possible — check `state/agents.json` for each agent's role.
+- **Hive status commands**: Use `/status` to see a live summary of all agents and task states, and `/agents` to list active agents and their current assignments.
+- **Dynamic agent management**: Use `/spin-up` to start a new agent mid-session, and `/tear-down <name>` to stop one. Agents can be added or removed without restarting the whole hive — useful when a task requires a specialist not initially provisioned.
+
+---
+
 ## Message Discipline
 
 - Keep ALL Discord messages under **1800 characters**.
