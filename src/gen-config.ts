@@ -14,7 +14,7 @@ import type { AgentEntry, AgentsJson } from './shared/agent-types.ts';
 // Types
 // ---------------------------------------------------------------------------
 
-interface Args {
+export interface Args {
   workers: number;
   agentNames: string[] | null;   // null = use numeric worker-NN names
   agentRoles: Map<string, string>;
@@ -62,7 +62,7 @@ interface ToolProfile {
   tools: string[];
 }
 
-interface ToolOverride {
+export interface ToolOverride {
   mode: "add" | "remove" | "replace";
   tools: string[];
 }
@@ -300,7 +300,7 @@ function validateAgentNames(names: string[]): void {
 // Resolve effective agent list + branch prefix
 // ---------------------------------------------------------------------------
 
-function resolveAgents(args: Args): { names: string[]; branchPrefix: string } {
+export function resolveAgents(args: Args): { names: string[]; branchPrefix: string } {
   let names: string[];
 
   if (args.agentNames !== null) {
@@ -355,7 +355,7 @@ function validate(args: Args): void {
 // Zero-padded worker label (used only for numeric mode)
 // ---------------------------------------------------------------------------
 
-function workerLabel(n: number, total: number): string {
+export function workerLabel(n: number, total: number): string {
   const digits = String(total).length;
   return String(n).padStart(Math.max(digits, 2), "0");
 }
@@ -364,15 +364,15 @@ function workerLabel(n: number, total: number): string {
 // File writers
 // ---------------------------------------------------------------------------
 
-function ensureDir(dir: string): void {
+export function ensureDir(dir: string): void {
   mkdirSync(dir, { recursive: true });
 }
 
-function writeJson(filePath: string, data: unknown): void {
+export function writeJson(filePath: string, data: unknown): void {
   writeFileSync(filePath, JSON.stringify(data, null, 2) + "\n", "utf-8");
 }
 
-function loadToolDefinitions(toolsDir: string): Map<string, ToolDefinition> {
+export function loadToolDefinitions(toolsDir: string): Map<string, ToolDefinition> {
   const defs = new Map<string, ToolDefinition>();
   if (!existsSync(toolsDir)) return defs;
 
@@ -393,7 +393,7 @@ function loadToolDefinitions(toolsDir: string): Map<string, ToolDefinition> {
   return defs;
 }
 
-function loadToolProfile(profilesDir: string, role: string): ToolProfile {
+export function loadToolProfile(profilesDir: string, role: string): ToolProfile {
   // Try role-specific profile first
   const rolePath = join(profilesDir, `${role}.json`);
   if (existsSync(rolePath)) {
@@ -422,7 +422,7 @@ function loadToolProfile(profilesDir: string, role: string): ToolProfile {
   return { role, tools: [] };
 }
 
-function loadSecrets(secretsPath: string): Record<string, string> {
+export function loadSecrets(secretsPath: string): Record<string, string> {
   const secrets: Record<string, string> = {};
   if (!existsSync(secretsPath)) return secrets;
 
@@ -439,7 +439,7 @@ function loadSecrets(secretsPath: string): Record<string, string> {
   return secrets;
 }
 
-function interpolateEnv(
+export function interpolateEnv(
   env: Record<string, string>,
   secrets: Record<string, string>
 ): Record<string, string> {
@@ -452,7 +452,7 @@ function interpolateEnv(
   return result;
 }
 
-function resolveToolsForRole(
+export function resolveToolsForRole(
   role: string,
   agentName: string,
   toolDefs: Map<string, ToolDefinition>,
@@ -517,14 +517,15 @@ function resolveToolsForRole(
   return result;
 }
 
-function buildRelayMcpConfig(
+export function buildRelayMcpConfig(
   stateDir: string,
   workerId: string,
   workerSocketPath: string,
   channelId: string,
   mentionPatterns: string,
   requireMention: boolean,
-  roleTools?: Record<string, McpServerEntry>
+  roleTools?: Record<string, McpServerEntry>,
+  gatewaySocket?: string,
 ): McpConfigJson {
   return {
     mcpServers: {
@@ -541,7 +542,7 @@ function buildRelayMcpConfig(
         env: {
           DISCORD_STATE_DIR: stateDir,
           DISCORD_ACCESS_MODE: "static",
-          HIVE_GATEWAY_SOCKET: "/tmp/hive-gateway/gateway.sock",
+          HIVE_GATEWAY_SOCKET: gatewaySocket ?? process.env.HIVE_GATEWAY_SOCKET ?? "/tmp/hive-gateway/gateway.sock",
           HIVE_WORKER_ID: workerId,
           HIVE_WORKER_PORT: workerSocketPath,
           HIVE_CHANNEL_ID: channelId,
@@ -558,7 +559,7 @@ function buildRelayMcpConfig(
 // Worktree management
 // ---------------------------------------------------------------------------
 
-function addWorktree(
+export function addWorktree(
   projectRepo: string,
   worktreePath: string,
   branch: string
@@ -602,7 +603,7 @@ function addWorktree(
 // agents.json management
 // ---------------------------------------------------------------------------
 
-function loadOrCreateAgentsJson(agentsPath: string): AgentsJson {
+export function loadOrCreateAgentsJson(agentsPath: string): AgentsJson {
   if (existsSync(agentsPath)) {
     try {
       const raw = readFileSync(agentsPath, "utf-8");
@@ -614,7 +615,7 @@ function loadOrCreateAgentsJson(agentsPath: string): AgentsJson {
   return { agents: [], created: new Date().toISOString(), mode: "single-bot" };
 }
 
-function mergeAgentsJson(
+export function mergeAgentsJson(
   existing: AgentsJson,
   newAgents: AgentEntry[]
 ): AgentsJson {
@@ -637,7 +638,7 @@ function mergeAgentsJson(
   };
 }
 
-function writeAgentsJson(
+export function writeAgentsJson(
   stateRoot: string,
   agentNames: string[],
   agentRoles: Map<string, string>,
@@ -712,10 +713,10 @@ function generateSingleBot(args: Args): void {
   ensureDir(gatewayDir);
 
   const gatewayConfig: GatewayConfigJson = {
-    botToken: args.token,
+    botToken: "(from DISCORD_BOT_TOKEN env var)",
     botId: args.botId || "(auto-discovered at runtime)",
     channelId: args.channelId,
-    socketPath: "/tmp/hive-gateway/gateway.sock",
+    socketPath: process.env.HIVE_GATEWAY_SOCKET ?? "/tmp/hive-gateway/gateway.sock",
     workers: gatewayWorkers,
   };
 

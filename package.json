@@ -10,9 +10,9 @@
     "validate": "bun run bin/hive validate"
   },
   "dependencies": {
-    "@discordjs/rest": "^2.3.0",
-    "discord-api-types": "^0.37.83",
-    "discord.js": "^14.14.0"
+    "@discordjs/rest": "^2.6.1",
+    "discord-api-types": "^0.37.120",
+    "discord.js": "^14.25.1"
   },
   "devDependencies": {
     "bun-types": "latest"

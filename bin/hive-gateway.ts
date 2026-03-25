@@ -20,8 +20,8 @@ import {
   type Message,
   type ChatInputCommandInteraction,
 } from 'discord.js'
-import { mkdirSync, existsSync, unlinkSync, readFileSync, writeFileSync, renameSync } from 'fs'
-import { join } from 'path'
+import { mkdirSync, existsSync, unlinkSync, readFileSync, writeFileSync, renameSync, chmodSync } from 'fs'
+import { join, dirname } from 'path'
 import type { DeltaFile } from '../src/mind/mind-types.ts'
 import { parseHeader, parseBody, extractAgentsList } from '../src/gateway/protocol-parser.ts'
 import { ThreadManager } from '../src/gateway/thread-manager.ts'
@@ -40,7 +40,7 @@ if (!TOKEN) {
 }
 
 const SOCKET_PATH = process.env.HIVE_GATEWAY_SOCKET ?? '/tmp/hive-gateway/gateway.sock'
-const GATEWAY_DIR = '/tmp/hive-gateway'
+const GATEWAY_DIR = dirname(SOCKET_PATH)
 const INBOX_DIR = join(GATEWAY_DIR, 'inbox')
 const MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
 const MAX_CHUNK = 2000
@@ -48,6 +48,15 @@ const MAX_CHUNK = 2000
 // HIVE_ROOT is the project root (directory containing bin/, state/, worktrees/)
 const HIVE_ROOT = import.meta.dir ? join(import.meta.dir, '..') : process.cwd()
 const AGENTS_JSON = join(HIVE_ROOT, 'state', 'agents.json')
+
+const ADMIN_USER_IDS = new Set(
+  (process.env.HIVE_ADMIN_IDS ?? '').split(',').filter(Boolean)
+)
+
+function checkAdmin(interaction: ChatInputCommandInteraction): boolean {
+  if (ADMIN_USER_IDS.size === 0) return true
+  return ADMIN_USER_IDS.has(interaction.user.id)
+}
 const threadManager = new ThreadManager(HIVE_ROOT)
 
 // ---------------------------------------------------------------------------
@@ -55,8 +64,8 @@ const threadManager = new ThreadManager(HIVE_ROOT)
 // ---------------------------------------------------------------------------
 
 interface AgentProcess {
-  process: ReturnType<typeof Bun.spawn>
-  pid: number
+  process: unknown  // Bun.spawn result or docker run metadata
+  pid: number       // 0 for container-managed agents
   startedAt: Date
 }
 
@@ -162,11 +171,9 @@ async function isMentioned(msg: Message, mentionPatterns: string[]): Promise<boo
   const refId = msg.reference?.messageId
   if (refId && recentSentIds.has(refId)) return true
 
-  // Custom regex patterns (case-insensitive)
+  // Literal string matching (case-insensitive) — no regex to avoid ReDoS
   for (const pat of mentionPatterns) {
-    try {
-      if (new RegExp(pat, 'i').test(msg.content)) return true
-    } catch {}
+    if (msg.content.toLowerCase().includes(pat.toLowerCase())) return true
   }
 
   return false
@@ -389,7 +396,8 @@ async function handleSlashBroadcast(interaction: ChatInputCommandInteraction): P
       } as any)
       results.push(`\`${worker.workerId}\`: ${res.ok ? 'delivered' : `HTTP ${res.status}`}`)
     } catch (err) {
-      results.push(`\`${worker.workerId}\`: failed (${err instanceof Error ? err.message : String(err)})`)
+      process.stderr.write(`hive-gateway: broadcast delivery to ${worker.workerId} failed: ${err}\n`)
+      results.push(`\`${worker.workerId}\`: delivery failed`)
     }
   }
 
@@ -434,7 +442,7 @@ async function handleSlashAsk(interaction: ChatInputCommandInteraction): Promise
     await interaction.editReply({ content: `Message delivered to \`${agentName}\`.` })
   } catch (err) {
     await interaction.editReply({
-      content: `Failed to deliver to \`${agentName}\`: ${err instanceof Error ? err.message : String(err)}`,
+      content: `Failed to deliver to \`${agentName}\`. Check gateway logs for details.`,
     })
   }
 }
@@ -457,7 +465,7 @@ async function handleSlashMemory(interaction: ChatInputCommandInteraction): Prom
     await interaction.editReply({ content: `**Memory for \`${agentName}\`:**\n\`\`\`\n${truncated}\n\`\`\`` })
   } catch (err) {
     await interaction.editReply({
-      content: `Failed to read memory for \`${agentName}\`: ${err instanceof Error ? err.message : String(err)}`,
+      content: `Failed to read memory for \`${agentName}\`. Check gateway logs for details.`,
     })
   }
 }
@@ -521,7 +529,7 @@ async function handleSlashAssign(interaction: ChatInputCommandInteraction): Prom
     await interaction.editReply({ content: `Task assigned to \`${agentName}\`:\n> ${task}` })
   } catch (err) {
     await interaction.editReply({
-      content: `Failed to assign task to \`${agentName}\`: ${err instanceof Error ? err.message : String(err)}`,
+      content: `Failed to assign task to \`${agentName}\`. Check gateway logs for details.`,
     })
   }
 }
@@ -529,6 +537,21 @@ async function handleSlashAssign(interaction: ChatInputCommandInteraction): Prom
 async function handleSlashSpinUp(interaction: ChatInputCommandInteraction): Promise<void> {
   const agentName = interaction.options.getString('name', true)
   const role = interaction.options.getString('role') ?? 'developer'
+
+  if (!checkAdmin(interaction)) {
+    await interaction.reply({ content: 'Not authorized.', ephemeral: true })
+    return
+  }
+
+  // Validate agent name and role format (security: prevent path traversal)
+  if (!/^[a-zA-Z0-9-]{1,32}$/.test(agentName)) {
+    await interaction.reply({ content: 'Invalid agent name. Must be alphanumeric + hyphens, 1-32 chars.', ephemeral: true })
+    return
+  }
+  if (!/^[a-zA-Z0-9-]{1,32}$/.test(role)) {
+    await interaction.reply({ content: 'Invalid role name. Must be alphanumeric + hyphens, 1-32 chars.', ephemeral: true })
+    return
+  }
 
   // Defer immediately — startup takes time
   await interaction.deferReply()
@@ -579,31 +602,71 @@ async function handleSlashSpinUp(interaction: ChatInputCommandInteraction): Prom
       }
     } catch { /* mind not available yet, continue without */ }
 
+    // Write system prompt to a temp file for the container
+    const promptFile = join(HIVE_ROOT, 'state', `.prompt-${agentName}.md`)
+    writeFileSync(promptFile, systemPrompt)
+
     // Build MCP config path (reuse existing worker config if present)
     const mcpConfigPath = join(HIVE_ROOT, 'state', 'workers', agentName, 'mcp-config.json')
+    const settingsPath = join(HIVE_ROOT, 'state', 'workers', agentName, 'settings.json')
 
-    const spawnArgs: string[] = [
-      'claude',
+    // Remove any existing container with this name
+    Bun.spawnSync(['docker', 'rm', '-f', `hive-${agentName}`], { stdout: 'pipe', stderr: 'pipe' })
+
+    // Launch agent in a Docker container (security: containerized isolation)
+    // --network=none: disables TCP/UDP. Unix sockets use AF_UNIX and work via bind mount.
+    const dockerArgs = [
+      'docker', 'run', '-d',
       '--name', `hive-${agentName}`,
-      '--append-system-prompt', systemPrompt,
+      '--network=none',
+      '-v', `${worktreeDir}:/workspace`,
+      '-v', `${join(HIVE_ROOT, 'config')}:/config:ro`,
+      '-v', '/tmp/hive-gateway:/gateway:rw',
+      '-v', `${promptFile}:/tmp/system-prompt.md:ro`,
     ]
 
-    if (existsSync(mcpConfigPath)) {
-      spawnArgs.push('--mcp-config', mcpConfigPath)
+    // Mount worker state dir if it exists (MCP config, settings)
+    const workerStateDir = join(HIVE_ROOT, 'state', 'workers', agentName)
+    if (existsSync(workerStateDir)) {
+      dockerArgs.push('-v', `${workerStateDir}:/state:ro`)
     }
 
-    spawnArgs.push('--permission-mode', 'bypassPermissions')
+    dockerArgs.push(
+      '-e', 'CLAUDE_API_KEY',
+      '-e', 'ANTHROPIC_API_KEY',
+      '-e', `HIVE_WORKER_ID=${agentName}`,
+      '-e', 'HIVE_ROOT=/workspace',
+      'hive-worker',
+      '--name', `hive-${agentName}`,
+      '--append-system-prompt', systemPrompt,
+    )
 
-    const proc = Bun.spawn(spawnArgs, {
-      cwd: worktreeDir,
-      stdin: 'pipe',
-      stdout: 'inherit',
-      stderr: 'inherit',
+    if (existsSync(mcpConfigPath)) {
+      dockerArgs.push('--mcp-config', '/state/mcp-config.json')
+    }
+    if (existsSync(settingsPath)) {
+      dockerArgs.push('--settings', '/state/settings.json')
+    }
+
+    dockerArgs.push('--permission-mode', 'bypassPermissions')
+
+    const proc = Bun.spawnSync(dockerArgs, {
+      cwd: HIVE_ROOT,
+      stdout: 'pipe',
+      stderr: 'pipe',
     })
 
+    const containerId = proc.stdout.toString().trim()
+    if (proc.exitCode !== 0) {
+      const stderr = proc.stderr.toString().trim()
+      process.stderr.write(`hive-gateway: docker run failed for ${agentName}: ${stderr}\n`)
+      await interaction.editReply({ content: `Failed to start container for \`${agentName}\`. Check gateway logs.` })
+      return
+    }
+
     agentProcesses.set(agentName, {
-      process: proc,
-      pid: proc.pid,
+      process: proc as any,
+      pid: 0, // Container-managed, no host PID
       startedAt: new Date(),
     })
 
@@ -621,7 +684,6 @@ async function handleSlashSpinUp(interaction: ChatInputCommandInteraction): Prom
       }
       writeAgentsJson(agentsData)
     } else {
-      // Create agents.json from scratch
       writeAgentsJson({
         agents: [{ name: agentName, role, status: 'running', created: new Date().toISOString() }],
         created: new Date().toISOString(),
@@ -630,32 +692,21 @@ async function handleSlashSpinUp(interaction: ChatInputCommandInteraction): Prom
     }
 
     const embed = new EmbedBuilder()
-      .setTitle('Agent Spawned')
+      .setTitle('Agent Spawned (Container)')
       .setColor(0x57f287)
       .addFields(
         { name: 'Name', value: agentName, inline: true },
         { name: 'Role', value: role, inline: true },
-        { name: 'PID', value: String(proc.pid), inline: true },
+        { name: 'Container', value: containerId.slice(0, 12), inline: true },
         { name: 'Worktree', value: worktreeDir },
       )
       .setTimestamp()
 
     await interaction.editReply({ embeds: [embed] })
 
-    // Clean up tracking when process exits
-    proc.exited.then(() => {
-      agentProcesses.delete(agentName)
-      const d = readAgentsJson()
-      if (d) {
-        const entry = d.agents.find((a) => a.name === agentName)
-        if (entry) entry.status = 'stopped'
-        writeAgentsJson(d)
-      }
-    }).catch(() => {})
-
   } catch (err) {
     await interaction.editReply({
-      content: `Failed to spin up \`${agentName}\`: ${err instanceof Error ? err.message : String(err)}`,
+      content: `Failed to spin up \`${agentName}\`. Check gateway logs for details.`,
     })
   }
 }
@@ -683,6 +734,11 @@ async function handleSlashThreads(interaction: ChatInputCommandInteraction): Pro
 async function handleSlashTearDown(interaction: ChatInputCommandInteraction): Promise<void> {
   const agentName = interaction.options.getString('name', true)
 
+  if (!checkAdmin(interaction)) {
+    await interaction.reply({ content: 'Not authorized.', ephemeral: true })
+    return
+  }
+
   const tracked = agentProcesses.get(agentName)
   if (!tracked) {
     await interaction.reply({
@@ -695,7 +751,10 @@ async function handleSlashTearDown(interaction: ChatInputCommandInteraction): Pr
   await interaction.deferReply()
 
   try {
-    tracked.process.kill('SIGTERM')
+    // Stop and remove the Docker container
+    Bun.spawnSync(['docker', 'stop', `hive-${agentName}`], { stdout: 'pipe', stderr: 'pipe' })
+    Bun.spawnSync(['docker', 'rm', `hive-${agentName}`], { stdout: 'pipe', stderr: 'pipe' })
+
     agentProcesses.delete(agentName)
 
     // Deregister from workers map if present
@@ -709,10 +768,10 @@ async function handleSlashTearDown(interaction: ChatInputCommandInteraction): Pr
       writeAgentsJson(data)
     }
 
-    await interaction.editReply({ content: `Agent \`${agentName}\` (PID ${tracked.pid}) has been sent SIGTERM.` })
+    await interaction.editReply({ content: `Agent \`${agentName}\` container stopped and removed.` })
   } catch (err) {
     await interaction.editReply({
-      content: `Failed to tear down \`${agentName}\`: ${err instanceof Error ? err.message : String(err)}`,
+      content: `Failed to tear down \`${agentName}\`. Check gateway logs for details.`,
     })
   }
 }
@@ -762,7 +821,8 @@ client.on('interactionCreate', async (interaction) => {
     process.stderr.write(`hive-gateway: interaction handler error: ${err}\n`)
     try {
       if (interaction.isRepliable()) {
-        const msg = `An error occurred: ${err instanceof Error ? err.message : String(err)}`
+        process.stderr.write(`hive-gateway: interaction error: ${err}\n`)
+        const msg = 'An internal error occurred. Check gateway logs for details.'
         if (interaction.deferred || interaction.replied) {
           await interaction.editReply({ content: msg })
         } else {
@@ -831,6 +891,11 @@ async function handleRegister(req: Request): Promise<Response> {
   const body = await readJson(req)
   const workerId = body.workerId as string
   if (!workerId) return jsonErr('workerId required', 400)
+
+  // Validate workerId format (security: finding #4 — prevent impersonation)
+  if (!/^[a-zA-Z0-9-]{1,32}$/.test(workerId)) {
+    return jsonErr('invalid workerId format', 400)
+  }
 
   workers.set(workerId, {
     workerId,
@@ -968,9 +1033,9 @@ async function handleSend(req: Request): Promise<Response> {
       noteSent(sent.id)
       sentIds.push(sent.id)
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
+      process.stderr.write(`hive-gateway: send chunk failed: ${err}\n`)
       return jsonErr(
-        `reply failed after ${sentIds.length} of ${chunks.length} chunks: ${msg}`,
+        `reply failed after ${sentIds.length} of ${chunks.length} chunks`,
       )
     }
   }
@@ -1071,9 +1136,12 @@ async function handleDownload(req: Request): Promise<Response> {
     const name = att.name ?? `${att.id}`
     const rawExt = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1) : 'bin'
     const ext = rawExt.replace(/[^a-zA-Z0-9]/g, '') || 'bin'
-    const path = join(INBOX_DIR, `${Date.now()}-${att.id}.${ext}`)
-    writeFileSync(path, buf)
-    paths.push(path)
+    const safePath = join(INBOX_DIR, `${Date.now()}-${att.id}.${ext}`)
+    if (!safePath.startsWith(INBOX_DIR)) {
+      return jsonErr('invalid attachment path', 400)
+    }
+    writeFileSync(safePath, buf)
+    paths.push(safePath)
   }
 
   return jsonOk({ files: paths })
@@ -1100,7 +1168,8 @@ function handleHealth(): Response {
 // HTTP server (Unix domain socket)
 // ---------------------------------------------------------------------------
 
-mkdirSync(GATEWAY_DIR, { recursive: true })
+mkdirSync(GATEWAY_DIR, { recursive: true, mode: 0o700 })
+chmodSync(GATEWAY_DIR, 0o700)
 if (existsSync(SOCKET_PATH)) unlinkSync(SOCKET_PATH)
 
 const server = Bun.serve({
@@ -1121,8 +1190,8 @@ const server = Bun.serve({
       if (method === 'POST' && path === '/download') return await handleDownload(req)
       return jsonErr('not found', 404)
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      return jsonErr(msg)
+      process.stderr.write(`hive-gateway: request error: ${err}\n`)
+      return jsonErr('internal error')
     }
   },
 })

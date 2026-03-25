@@ -3,40 +3,82 @@
  * bin/hive — Unified CLI for the Hive orchestrator
  */
 
-import { resolve, join } from 'path'
+import { resolve } from 'path'
 
 const HIVE_DIR = resolve(import.meta.dir, '..')
+process.env.HIVE_DIR ??= HIVE_DIR
+
 const args = process.argv.slice(2)
 const subcommand = args[0]
 const subArgs = args.slice(1)
 
 switch (subcommand) {
-  case 'launch':
-  case 'teardown':
-  case 'status':
-  case 'integrate': {
-    const scriptMap: Record<string, string> = {
-      launch: 'launch.sh',
-      teardown: 'launch.sh',
-      status: 'status.sh',
-      integrate: 'integrate.sh',
-    }
-    const script = join(HIVE_DIR, 'src', 'scripts', scriptMap[subcommand])
-    const shellArgs = subcommand === 'teardown' ? ['--teardown', ...subArgs] : subArgs
-    const result = Bun.spawnSync(['bash', script, ...shellArgs], {
-      cwd: HIVE_DIR,
-      env: { ...process.env, HIVE_DIR },
-      stdio: ['inherit', 'inherit', 'inherit'],
-    })
-    process.exit(result.exitCode ?? 1)
-  }
-  case 'gen-config': {
-    const mod = await import('../src/gen-config.ts')
-    await mod.main(subArgs)
+  // Project-aware commands (config-driven)
+  case 'up': {
+    const m = await import('../src/scripts/launch.ts')
+    await m.projectUp(subArgs)
     break
   }
-  case 'validate': {
-    const mod = await import('../src/validate-tools.ts')
+  case 'down': {
+    const m = await import('../src/scripts/launch.ts')
+    await m.projectDown(subArgs)
+    break
+  }
+  case 'fresh': {
+    const m = await import('../src/scripts/launch.ts')
+    await m.projectFresh(subArgs)
+    break
+  }
+  case 'ls': {
+    const m = await import('../src/shared/project-config.ts')
+    m.listProjects(m.loadConfig())
+    break
+  }
+  case 'init': {
+    const m = await import('../src/shared/project-config.ts')
+    m.initConfig()
+    break
+  }
+  case 'edit': {
+    const m = await import('../src/shared/project-config.ts')
+    const editor = process.env.EDITOR ?? 'nano'
+    Bun.spawnSync([editor, m.configPath], { stdio: ['inherit', 'inherit', 'inherit'] })
+    break
+  }
+  case 'attach': {
+    const name = subArgs[0]
+    if (!name) { console.log('Usage: hive attach <project>'); process.exit(1) }
+    const session = `hive-${name}`
+    const result = Bun.spawnSync(['tmux', 'attach', '-t', session], { stdio: ['inherit', 'inherit', 'inherit'] })
+    process.exit(result.exitCode ?? 1)
+    break
+  }
+
+  // Direct commands (standalone use without project config)
+  case 'launch': {
+    const m = await import('../src/scripts/launch.ts')
+    await m.main(subArgs)
+    break
+  }
+  case 'teardown': {
+    const m = await import('../src/scripts/launch.ts')
+    await m.main(['--teardown', ...subArgs])
+    break
+  }
+  case 'status': {
+    const m = await import('../src/scripts/status.ts')
+    await m.main(subArgs)
+    break
+  }
+  case 'integrate': {
+    const m = await import('../src/scripts/integrate.ts')
+    await m.main(subArgs)
+    break
+  }
+
+  // Utilities
+  case 'gen-config': {
+    const mod = await import('../src/gen-config.ts')
     await mod.main(subArgs)
     break
   }
@@ -45,22 +87,29 @@ switch (subcommand) {
     await mod.main(subArgs)
     break
   }
+
   default:
     console.log(`hive — Discord multi-session Claude Code orchestrator
 
 Usage: hive <command> [options]
 
-Commands:
-  launch              Launch a full Hive swarm (manager + N workers)
-  teardown            Stop all running sessions
-  status              Check process and branch status
-  integrate           Merge completed worker branches
-  gen-config          Generate per-worker configuration files
-  validate            Validate MCP tool configurations
-  register-commands   Register Discord slash commands
+Project commands (config-driven):
+  up <project>        Launch a hive from ~/.config/hive/config.json
+  down <project>      Teardown a project's hive
+  fresh <project>     Clean slate — remove state, then relaunch
+  ls                  List configured projects
+  init                Create starter config
+  edit                Open config in $EDITOR
+  attach <project>    Attach to project's tmux session
 
-Daemons (separate processes):
-  bin/hive-gateway.ts    Discord gateway (started by launch)
-  bin/hive-mind.ts       Agent CLI (+ daemon subcommand)
+Direct commands (standalone):
+  launch [options]    Launch with explicit flags (--project-repo, --channel-id, etc.)
+  teardown            Stop all running sessions
+  status              Check running hive status
+  integrate           Merge completed worker branches
+
+Utilities:
+  gen-config          Generate per-worker configuration files
+  register-commands   Register Discord slash commands
 `)
 }
