@@ -7,6 +7,7 @@
 
 import { execSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { type AgentEntry, type AgentsJson, NO_WORKTREE_ROLES } from "./shared/agent-types.ts";
 import { parseAgentAssignment, validateDomain, validateRole } from "./shared/validation.ts";
@@ -554,6 +555,50 @@ export function resolveToolsForRole(
   return result;
 }
 
+// ---------------------------------------------------------------------------
+// Global settings reader (OMC hooks + MCP servers)
+// ---------------------------------------------------------------------------
+
+interface GlobalSettings {
+  hooks?: Record<string, unknown[]>;
+  mcpServers?: Record<string, McpServerEntry>;
+}
+
+/**
+ * Read Claude global settings files and extract hooks and MCP servers.
+ * Merges settings.json and settings.local.json (local takes precedence).
+ */
+export function loadGlobalSettings(): GlobalSettings {
+  const claudeDir = join(homedir(), ".claude");
+  const result: GlobalSettings = {};
+
+  for (const filename of ["settings.json", "settings.local.json"]) {
+    const filePath = join(claudeDir, filename);
+    if (!existsSync(filePath)) continue;
+    try {
+      const raw = JSON.parse(readFileSync(filePath, "utf-8"));
+      // Merge hooks (append arrays per event type)
+      if (raw.hooks && typeof raw.hooks === "object") {
+        if (!result.hooks) result.hooks = {};
+        for (const [event, hookEntries] of Object.entries(raw.hooks)) {
+          if (!Array.isArray(hookEntries)) continue;
+          if (!result.hooks[event]) result.hooks[event] = [];
+          (result.hooks[event] as unknown[]).push(...hookEntries);
+        }
+      }
+      // Merge MCP servers
+      if (raw.mcpServers && typeof raw.mcpServers === "object") {
+        if (!result.mcpServers) result.mcpServers = {};
+        Object.assign(result.mcpServers, raw.mcpServers);
+      }
+    } catch (err) {
+      console.warn(`  WARN  Failed to parse ${filePath}: ${err}`);
+    }
+  }
+
+  return result;
+}
+
 export function buildRelayMcpConfig(
   _stateDir: string,
   workerId: string,
@@ -563,9 +608,12 @@ export function buildRelayMcpConfig(
   _requireMention: boolean,
   roleTools?: Record<string, McpServerEntry>,
   gatewaySocket?: string,
+  globalMcpServers?: Record<string, McpServerEntry>,
 ): McpConfigJson {
   return {
     mcpServers: {
+      // Global MCP servers (e.g. OMC tools) go first so hive-specific ones take precedence
+      ...(globalMcpServers ?? {}),
       discord: {
         command: "bun",
         args: ["run", DISCORD_RELAY_PATH],
@@ -804,6 +852,8 @@ function generateSingleBot(args: Args): void {
       mentionPatterns: isManager ? [name, "hive"] : [name, "all-workers"],
     };
 
+    const globalSettings = loadGlobalSettings();
+
     writeJson(join(workerDir, "access.json"), workerAccess);
     writeJson(
       join(workerDir, "mcp-config.json"),
@@ -815,6 +865,8 @@ function generateSingleBot(args: Args): void {
         isManager ? `${name},hive` : `${name},all-workers`,
         !isManager,
         roleTools,
+        undefined,
+        globalSettings.mcpServers,
       ),
     );
 
@@ -822,22 +874,30 @@ function generateSingleBot(args: Args): void {
     console.log(`  CREATE  state/workers/${name}/mcp-config.json`);
 
     // Generate settings.json with scope enforcement hook (skip for no-worktree roles)
+    // Merge OMC hooks from global settings so agent sessions have full OMC capabilities
     if (!NO_WORKTREE_ROLES.has(agentRole)) {
-      const workerSettings = {
-        hooks: {
-          PreToolUse: [
-            {
-              matcher: "Write|Edit|Bash",
-              hooks: [
-                {
-                  type: "command",
-                  command: `node "${join(HIVE_ROOT, "hooks", "check-scope.mjs")}"`,
-                },
-              ],
-            },
-          ],
-        },
-      };
+      const mergedHooks: Record<string, unknown[]> = {};
+
+      // Start with global hooks
+      if (globalSettings.hooks) {
+        for (const [event, entries] of Object.entries(globalSettings.hooks)) {
+          mergedHooks[event] = [...(entries as unknown[])];
+        }
+      }
+
+      // Add scope enforcement hook to PreToolUse
+      if (!mergedHooks.PreToolUse) mergedHooks.PreToolUse = [];
+      mergedHooks.PreToolUse.push({
+        matcher: "Write|Edit|Bash",
+        hooks: [
+          {
+            type: "command",
+            command: `node "${join(HIVE_ROOT, "hooks", "check-scope.mjs")}"`,
+          },
+        ],
+      });
+
+      const workerSettings = { hooks: mergedHooks };
       writeFileSync(join(workerDir, "settings.json"), JSON.stringify(workerSettings, null, 2));
       console.log(`  CREATE  state/workers/${name}/settings.json`);
     }
