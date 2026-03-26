@@ -335,7 +335,7 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
     }
     case 'hive__create_channel': {
       const topic = args.topic as string
-      // MCP SDK may deliver array args as a JSON string — parse defensively
+      // MCP clients may stringify array arguments — parse defensively
       let participants: string[] | undefined
       if (Array.isArray(args.participants)) {
         participants = args.participants as string[]
