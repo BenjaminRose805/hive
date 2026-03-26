@@ -440,6 +440,10 @@ async function routeInbound(msg: Message, excludeSender?: string): Promise<void>
   const attCount = attachments.length
   const content = msg.content || (attCount > 0 ? '(attachment)' : '')
 
+  // Human messages (non-bot Discord users) always nudge — they should never be
+  // silently queued behind a "focused" status gate.
+  const isHumanMessage = !msg.author.bot
+
   // Write message to inbox and nudge each target worker via tmux
   const deliveries = targets.map(async (worker) => {
     // Use conversation channel ID for active members, agent's own channel for Pass 1/2
@@ -461,7 +465,8 @@ async function routeInbound(msg: Message, excludeSender?: string): Promise<void>
     writeToInbox(worker.workerId, inboxMsg)
 
     // Use shouldNudge + debounce instead of direct nudgeViaTmux
-    if (shouldNudge(worker) && !shouldDebounceNudge(worker.workerId)) {
+    // Human messages bypass status-based suppression (always nudge)
+    if ((isHumanMessage || shouldNudge(worker)) && !shouldDebounceNudge(worker.workerId)) {
       const ok = await nudgeViaTmux(worker.workerId)
       if (ok) {
         process.stderr.write(`hive-gateway: delivered message to ${worker.workerId} inbox + nudge\n`)
