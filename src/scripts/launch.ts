@@ -1118,6 +1118,13 @@ export async function projectDown(args: string[]): Promise<void> {
 
 /** Teardown --clean, remove state, call projectUp */
 export async function projectFresh(args: string[]): Promise<void> {
+  const projectName = args.find(a => !a.startsWith('-'));
+  if (projectName) {
+    process.env.HIVE_SESSION = `hive-${projectName}`;
+    process.env.HIVE_GATEWAY_SOCKET = `/tmp/hive-gateway-${projectName}/gateway.sock`;
+    process.env.HIVE_STATE_DIR = join(HIVE_DIR, 'state', projectName);
+  }
+
   doTeardown(true);
 
   // Remove state dir contents (but keep the directory)
