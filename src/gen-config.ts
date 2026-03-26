@@ -682,7 +682,7 @@ export function writeAgentsJson(
 
 function generateSingleBot(args: Args): void {
   const { names, branchPrefix } = resolveAgents(args);
-  const stateRoot = join(HIVE_ROOT, "state");
+  const stateRoot = process.env.HIVE_STATE_DIR ?? join(HIVE_ROOT, "state");
   const worktreesRoot = join(HIVE_ROOT, "worktrees");
 
   // -------------------------------------------------------------------------
