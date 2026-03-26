@@ -273,29 +273,40 @@ Agents must push their branch before reporting COMPLETE, BLOCKED, or FAILED. Par
 
 ---
 
-## Threading
+## Conversation Channels
 
-### Per-Task Threads
+### Per-Task Channels
 
-Each TASK_ASSIGN creates a dedicated Discord thread in the main channel. The thread isolates all communication for that task — STATUS updates, QUESTIONs, ANSWERs, and the final COMPLETE message all happen within the thread.
+Each TASK_ASSIGN creates a dedicated Discord text channel (`#task-{id}-{slug}`) under the Hive category. The channel isolates all communication for that task — STATUS updates, QUESTIONs, ANSWERs, and the final COMPLETE message all happen in the channel.
 
-- **Thread naming**: `agent: task-id` (e.g. `alice: auth-middleware`)
-- **Created by**: The gateway, upon intercepting an outbound TASK_ASSIGN
-- **Archived after**: INTEGRATE completes for the task's agent
-- **Fallback**: If thread creation fails (permissions, API error), messages go to the main channel
+- **Channel naming**: `task-{id}-{slug}` (e.g. `task-1-auth-middleware`)
+- **Created by**: The gateway, upon processing an outbound TASK_ASSIGN
+- **Persisted**: `state/gateway/conversation-channels.json` — survives gateway restarts
+- **Cleanup**: `hive down --clean` deletes all conversation channels
+
+### Two-Tier Participation
+
+Conversation channels track participants in two tiers:
+- **Active**: receives every message in their inbox (real-time collaboration)
+- **Observing**: gets zero inbox delivery — reads Discord history via `fetch_messages` on their own schedule
+
+The assigned agent is automatically **active**. Other agents added via `hive__add_to_channel` start as **observing** and can promote themselves to active with `hive__set_channel_tier`.
+
+### Ad-Hoc Conversation Channels
+
+Agents can create conversation channels for multi-party discussions beyond task scope using `hive__create_channel`. The creator is active; other participants start as observing. Channel naming: `conv-{timestamp}-{slug}`.
 
 ### Manager View
 
-The manager stays in the main channel and sees:
-- HEARTBEAT messages (no task-id, always in main channel)
-- COMPLETE embed summaries (rich embeds with agent name, task-id, branch, thread link)
+The manager receives all messages via role-based routing (Pass 1) and is never added as a conversation channel participant. The manager sees:
+- All messages in all channels via role-based routing
+- HEARTBEAT messages in agent channels
+- COMPLETE embed summaries on the dashboard
 - INTEGRATE messages
 
-Workers are delivered TASK_ASSIGN messages with the thread's channel ID, so their subsequent replies naturally land in the thread.
+### Channel Permissions
 
-### Thread Permissions
-
-The bot requires `SEND_MESSAGES_IN_THREADS` permission in the Discord server. The `GuildMessages` intent (already configured) covers public thread messages.
+The bot requires `Manage Channels` permission in the Discord server to create per-task and conversation channels.
 
 ---
 
@@ -315,6 +326,7 @@ The gateway applies selective routing so each worker only receives messages rele
 | ESCALATE | All workers and manager | Human decision broadcast to entire channel |
 | Direct @name mention | Named agent only | Explicit targeting |
 | `all-workers` / `all-agents` keyword | All workers | Broadcast override |
+| Conversation channel message | Active participants (Pass 3) | Channel membership delivery |
 | Unparsable message | All workers | Backward compatibility fallback |
 
 ### Field-2 Semantics
@@ -324,23 +336,25 @@ The gateway applies selective routing so each worker only receives messages rele
 
 ---
 
-## Thread Lifecycle
+## Channel Lifecycle
 
 ```
-TASK_ASSIGN intercepted → Gateway creates thread → Worker receives message with thread chat_id
+TASK_ASSIGN processed → Gateway creates #task-{id}-{slug} → Agent added as active participant
     ↓
-Worker STATUS/QUESTION replies land in thread (self-routing via chat_id)
+Agent replies go to task channel (using chatId from inbox message)
     ↓
-COMPLETE posted in thread + embed summary in main channel
+Other agents added via hive__add_to_channel (start as observing, promote when ready)
     ↓
-INTEGRATE → thread archived
+COMPLETE posted in task channel + embed summary on dashboard
+    ↓
+Channel persists for reference — cleaned up by hive down --clean
 ```
 
-- **Creation**: Gateway intercepts outbound TASK_ASSIGN, creates a thread named `agent: task-id`, delivers to worker with the thread's channel ID
-- **Active use**: Worker replies go to the thread naturally because they send to the chat_id they received
-- **Completion**: COMPLETE message stays in thread; a rich Discord embed summary appears in the main channel (agent name, task-id, branch, commit count, thread link)
-- **Cleanup**: After INTEGRATE, the thread is archived. If a thread is externally deleted, the gateway cleans up the mapping via the `threadDelete` event
-- **Fallback**: If no thread exists for a task (creation failed, or pre-Phase-2 messages), messages go to the main channel as before
+- **Creation**: Gateway creates a text channel on TASK_ASSIGN, registers as a conversation channel with the assigned agent as active
+- **Active use**: Active participants receive every message in their inbox. Observing participants read Discord history on demand.
+- **Participation changes**: Agents promote/demote with `hive__set_channel_tier`, leave with `hive__leave_channel`
+- **Completion**: COMPLETE message stays in channel; dashboard gets an embed summary
+- **Cleanup**: `hive down --clean` deletes all conversation channels. Agent teardown removes the agent from all participant sets.
 
 ---
 

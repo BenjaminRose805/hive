@@ -3,6 +3,8 @@ import type { ParsedHeader, RoutingDecision, MessageType } from './types.ts'
 export interface WorkerInfo {
   workerId: string
   channelId: string
+  role?: string
+  domain?: string
 }
 
 export function shouldDeliver(
@@ -28,7 +30,7 @@ export function shouldDeliver(
     return { deliver: true, reason: `direct @mention of ${worker.workerId}` }
   }
 
-  const isManager = worker.workerId === 'manager'
+  const isCoordinator = worker.role === 'manager'
 
   switch (parsed.type) {
     case 'TASK_ASSIGN' as MessageType:
@@ -42,22 +44,22 @@ export function shouldDeliver(
         : { deliver: false, reason: `ANSWER targeted to ${parsed.target}, not ${worker.workerId}` }
 
     case 'QUESTION' as MessageType:
-      return isManager
+      return isCoordinator
         ? { deliver: true, reason: 'QUESTION routed to manager' }
         : { deliver: false, reason: 'QUESTION is manager-only' }
 
     case 'STATUS' as MessageType:
-      return isManager
+      return isCoordinator
         ? { deliver: true, reason: 'STATUS routed to manager' }
         : { deliver: false, reason: 'STATUS is manager-only' }
 
     case 'HEARTBEAT' as MessageType:
-      return isManager
+      return isCoordinator
         ? { deliver: true, reason: 'HEARTBEAT routed to manager' }
         : { deliver: false, reason: 'HEARTBEAT is manager-only' }
 
     case 'COMPLETE' as MessageType:
-      return isManager
+      return isCoordinator
         ? { deliver: true, reason: 'COMPLETE routed to manager' }
         : { deliver: false, reason: 'COMPLETE is manager-only' }
 

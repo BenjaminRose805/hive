@@ -1,5 +1,0 @@
-{
-  "role": "frontend-dev",
-  "description": "Frontend developer — docs, HTTP, browser testing, and GitHub",
-  "tools": ["context7", "fetch", "puppeteer", "github"]
-}

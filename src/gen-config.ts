@@ -6,9 +6,10 @@
  */
 
 import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from "fs";
-import { resolve, join } from "path";
+import { resolve, join, dirname } from "path";
 import { execSync } from "child_process";
-import type { AgentEntry, AgentsJson } from './shared/agent-types.ts';
+import { NO_WORKTREE_ROLES, type AgentEntry, type AgentsJson } from './shared/agent-types.ts';
+import { parseAgentAssignment, validateRole, validateDomain } from './shared/validation.ts';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -18,6 +19,7 @@ export interface Args {
   workers: number;
   agentNames: string[] | null;   // null = use numeric worker-NN names
   agentRoles: Map<string, string>;
+  agentDomains: Map<string, string>;
   channelId: string;
   token: string;
   botId: string;
@@ -70,14 +72,19 @@ export interface ToolOverride {
 interface GatewayWorkerConfig {
   workerId: string;
   socketPath: string;
+  channelId: string;
   mentionPatterns: string[];
   requireMention: boolean;
+  role: string;
+  domain?: string;
 }
 
 interface GatewayConfigJson {
   botToken: string;
   botId: string;
   channelId: string;
+  dashboardChannelId: string;
+  guildId: string;
   socketPath: string;
   workers: GatewayWorkerConfig[];
 }
@@ -87,10 +94,10 @@ interface GatewayConfigJson {
 // ---------------------------------------------------------------------------
 
 const HIVE_ROOT = resolve(import.meta.dir, "..");
-const DISCORD_PLUGIN_PATH = process.env.DISCORD_PLUGIN_PATH
-  ?? join(process.env.HOME ?? "", ".claude/plugins/cache/claude-plugins-official/discord/0.0.1");
+const DISCORD_RELAY_PATH = join(HIVE_ROOT, "src/mcp/discord-relay.ts");
+const INBOX_RELAY_PATH = join(HIVE_ROOT, "src/mcp/inbox-relay.ts");
 
-const RESERVED_NAMES = new Set(["manager", "gateway", "all-workers", "all-agents", "hive"]);
+const RESERVED_NAMES = new Set(["gateway", "all-workers", "all-agents", "hive"]);
 const AGENT_NAME_RE = /^[a-zA-Z0-9-]{1,32}$/;
 
 // ---------------------------------------------------------------------------
@@ -107,9 +114,10 @@ USAGE
 AGENT NAMING
   --agents <names>          Comma-separated agent names (e.g. alice,bob,carol).
                             Overrides --workers N. Names must be alphanumeric +
-                            hyphens, 1-32 chars. Reserved: manager, gateway,
+                            hyphens, 1-32 chars. Reserved: gateway,
                             all-workers, all-agents, hive.
-  --roles <name:role,...>   Optional role assignments (e.g. alice:developer,bob:qa).
+  --roles <name:role:domain,...>  Optional role and domain assignments (e.g. alice:engineer:backend,bob:qa:testing).
+                            Domain is optional: alice:engineer is also valid.
   --workers N               Number of workers using auto-names worker-01..NN (default: 3).
                             Ignored when --agents is provided.
 
@@ -129,9 +137,6 @@ OUTPUT STRUCTURE
     agents.json
     gateway/
       config.json
-    manager/
-      access.json
-      mcp-config.json
     workers/
       <name>/
         access.json
@@ -144,7 +149,7 @@ EXAMPLES
   # Named agents
   bun run src/gen-config.ts \\
     --agents alice,bob,carol \\
-    --roles alice:developer,bob:backend-dev,carol:qa-engineer \\
+    --roles alice:engineer:frontend,bob:engineer:backend,carol:qa \\
     --token "Bot MySecretToken" \\
     --channel-id 1234567890123456789
 
@@ -165,6 +170,7 @@ function parseArgs(argv: string[]): Args {
     workers: 3,
     agentNames: null,
     agentRoles: new Map(),
+    agentDomains: new Map(),
     channelId: "",
     token: "",
     botId: "",
@@ -195,16 +201,11 @@ function parseArgs(argv: string[]): Args {
       case "--roles": {
         const pairs = argv[++i].split(",").map((s) => s.trim()).filter(Boolean);
         for (const pair of pairs) {
-          const colon = pair.indexOf(":");
-          if (colon === -1) {
-            console.error(`ERROR: Invalid --roles entry "${pair}". Expected format: name:role`);
-            process.exit(1);
-          }
-          const name = pair.slice(0, colon).trim();
-          const role = pair.slice(colon + 1).trim();
-          if (name && role) {
-            args.agentRoles.set(name, role);
-          }
+          const { name, role, domain } = parseAgentAssignment(pair);
+          validateRole(role);
+          if (domain) validateDomain(domain);
+          args.agentRoles.set(name, role);
+          if (domain) args.agentDomains.set(name, domain);
         }
         break;
       }
@@ -531,23 +532,30 @@ export function buildRelayMcpConfig(
     mcpServers: {
       discord: {
         command: "bun",
-        args: [
-          "run",
-          "--cwd",
-          DISCORD_PLUGIN_PATH,
-          "--shell=bun",
-          "--silent",
-          "start",
-        ],
+        args: ["run", DISCORD_RELAY_PATH],
         env: {
-          DISCORD_STATE_DIR: stateDir,
-          DISCORD_ACCESS_MODE: "static",
           HIVE_GATEWAY_SOCKET: gatewaySocket ?? process.env.HIVE_GATEWAY_SOCKET ?? "/tmp/hive-gateway/gateway.sock",
           HIVE_WORKER_ID: workerId,
-          HIVE_WORKER_PORT: workerSocketPath,
           HIVE_CHANNEL_ID: channelId,
-          HIVE_MENTION_PATTERNS: mentionPatterns,
-          HIVE_REQUIRE_MENTION: requireMention ? "true" : "false",
+        },
+      },
+      inbox: {
+        command: "bun",
+        args: ["run", INBOX_RELAY_PATH],
+        env: {
+          HIVE_INBOX_DIR: join(
+            dirname(gatewaySocket ?? process.env.HIVE_GATEWAY_SOCKET ?? "/tmp/hive-gateway/gateway.sock"),
+            "inbox",
+            "messages",
+            workerId,
+          ),
+          HIVE_INBOX_ROOT: join(
+            dirname(gatewaySocket ?? process.env.HIVE_GATEWAY_SOCKET ?? "/tmp/hive-gateway/gateway.sock"),
+            "inbox",
+            "messages",
+          ),
+          HIVE_WORKER_ID: workerId,
+          HIVE_GATEWAY_SOCKET: gatewaySocket ?? process.env.HIVE_GATEWAY_SOCKET ?? "/tmp/hive-gateway/gateway.sock",
         },
       },
       ...(roleTools ?? {}),
@@ -624,8 +632,12 @@ export function mergeAgentsJson(
   );
 
   for (const agent of newAgents) {
-    if (existingByName.has(agent.name)) {
-      console.warn(`  WARN  Agent "${agent.name}" already exists in agents.json — preserving existing entry.`);
+    const existing = existingByName.get(agent.name);
+    if (existing) {
+      // Update status and role for re-launched agents
+      existing.status = agent.status;
+      existing.role = agent.role;
+      existing.domain = agent.domain;
     } else {
       existingByName.set(agent.name, agent);
     }
@@ -642,15 +654,20 @@ export function writeAgentsJson(
   stateRoot: string,
   agentNames: string[],
   agentRoles: Map<string, string>,
-  agentsPath: string
+  agentsPath: string,
+  agentDomains: Map<string, string> = new Map()
 ): void {
   const now = new Date().toISOString();
-  const newAgents: AgentEntry[] = agentNames.map((name) => ({
-    name,
-    role: agentRoles.get(name) ?? "developer",
-    created: now,
-    status: "configured",
-  }));
+  const newAgents: AgentEntry[] = agentNames.map((name) => {
+    const domain = agentDomains.get(name);
+    return {
+      name,
+      role: agentRoles.get(name) ?? "engineer",
+      ...(domain ? { domain } : {}),
+      created: now,
+      status: "configured",
+    };
+  });
 
   const existing = loadOrCreateAgentsJson(agentsPath);
   const merged = mergeAgentsJson(existing, newAgents);
@@ -687,23 +704,20 @@ function generateSingleBot(args: Args): void {
   // Build gateway worker list
   // -------------------------------------------------------------------------
 
-  const gatewayWorkers: GatewayWorkerConfig[] = [
-    {
-      workerId: "manager",
-      socketPath: "/tmp/hive-gateway/manager.sock",
-      mentionPatterns: ["manager", "hive"],
-      requireMention: false,
-    },
-  ];
-
-  for (const name of names) {
-    gatewayWorkers.push({
+  const gatewayWorkers: GatewayWorkerConfig[] = names.map(name => {
+    const role = args.agentRoles.get(name) ?? 'engineer';
+    const domain = args.agentDomains.get(name);
+    const isManager = role === 'manager';
+    return {
       workerId: name,
       socketPath: `/tmp/hive-gateway/${name}.sock`,
-      mentionPatterns: [name, "all-workers"],
-      requireMention: true,
-    });
-  }
+      channelId: "",
+      mentionPatterns: isManager ? [name, 'hive'] : [name, 'all-workers'],
+      requireMention: !isManager,
+      role,
+      ...(domain ? { domain } : {}),
+    };
+  });
 
   // -------------------------------------------------------------------------
   // Write gateway config
@@ -716,51 +730,14 @@ function generateSingleBot(args: Args): void {
     botToken: "(from DISCORD_BOT_TOKEN env var)",
     botId: args.botId || "(auto-discovered at runtime)",
     channelId: args.channelId,
+    dashboardChannelId: args.channelId,
+    guildId: "",
     socketPath: process.env.HIVE_GATEWAY_SOCKET ?? "/tmp/hive-gateway/gateway.sock",
     workers: gatewayWorkers,
   };
 
   writeJson(join(gatewayDir, "config.json"), gatewayConfig);
   console.log(`  CREATE  state/gateway/config.json`);
-
-  // -------------------------------------------------------------------------
-  // Generate manager config
-  // -------------------------------------------------------------------------
-
-  const managerStateDir = join(stateRoot, "manager");
-  ensureDir(managerStateDir);
-
-  const managerAccess: AccessJson = {
-    dmPolicy: "disabled",
-    allowFrom: [],
-    groups: {
-      [args.channelId]: {
-        requireMention: false,
-        allowFrom: [],
-      },
-    },
-    pending: {},
-    mentionPatterns: ["manager", "hive"],
-  };
-
-  const managerTools = resolveToolsForRole("manager", "manager", toolDefs, profilesDir, secrets, args.toolOverrides);
-
-  writeJson(join(managerStateDir, "access.json"), managerAccess);
-  writeJson(
-    join(managerStateDir, "mcp-config.json"),
-    buildRelayMcpConfig(
-      managerStateDir,
-      "manager",
-      "/tmp/hive-gateway/manager.sock",
-      args.channelId,
-      "manager,hive",
-      false,
-      managerTools
-    )
-  );
-
-  console.log(`  CREATE  state/manager/access.json`);
-  console.log(`  CREATE  state/manager/mcp-config.json`);
 
   // -------------------------------------------------------------------------
   // Generate per-agent configs
@@ -770,7 +747,8 @@ function generateSingleBot(args: Args): void {
     const workerDir = join(stateRoot, "workers", name);
     ensureDir(workerDir);
 
-    const agentRole = args.agentRoles.get(name) ?? "developer";
+    const agentRole = args.agentRoles.get(name) ?? "engineer";
+    const isManager = agentRole === 'manager';
     const roleTools = resolveToolsForRole(agentRole, name, toolDefs, profilesDir, secrets, args.toolOverrides);
 
     const workerAccess: AccessJson = {
@@ -778,12 +756,12 @@ function generateSingleBot(args: Args): void {
       allowFrom: [],
       groups: {
         [args.channelId]: {
-          requireMention: true,
+          requireMention: !isManager,
           allowFrom: [],
         },
       },
       pending: {},
-      mentionPatterns: [name, "all-workers"],
+      mentionPatterns: isManager ? [name, "hive"] : [name, "all-workers"],
     };
 
     writeJson(join(workerDir, "access.json"), workerAccess);
@@ -794,8 +772,8 @@ function generateSingleBot(args: Args): void {
         name,
         `/tmp/hive-gateway/${name}.sock`,
         args.channelId,
-        `${name},all-workers`,
-        true,
+        isManager ? `${name},hive` : `${name},all-workers`,
+        !isManager,
         roleTools
       )
     );
@@ -803,29 +781,31 @@ function generateSingleBot(args: Args): void {
     console.log(`  CREATE  state/workers/${name}/access.json`);
     console.log(`  CREATE  state/workers/${name}/mcp-config.json`);
 
-    // Generate settings.json with scope enforcement hook
-    const workerSettings = {
-      hooks: {
-        PreToolUse: [
-          {
-            matcher: 'Write|Edit|Bash',
-            hooks: [
-              {
-                type: 'command',
-                command: `node "${join(HIVE_ROOT, 'hooks', 'check-scope.mjs')}"`,
-              },
-            ],
-          },
-        ],
-      },
+    // Generate settings.json with scope enforcement hook (skip for no-worktree roles)
+    if (!NO_WORKTREE_ROLES.has(agentRole)) {
+      const workerSettings = {
+        hooks: {
+          PreToolUse: [
+            {
+              matcher: 'Write|Edit|Bash',
+              hooks: [
+                {
+                  type: 'command',
+                  command: `node "${join(HIVE_ROOT, 'hooks', 'check-scope.mjs')}"`,
+                },
+              ],
+            },
+          ],
+        },
+      }
+      writeFileSync(join(workerDir, 'settings.json'), JSON.stringify(workerSettings, null, 2))
+      console.log(`  CREATE  state/workers/${name}/settings.json`);
     }
-    writeFileSync(join(workerDir, 'settings.json'), JSON.stringify(workerSettings, null, 2))
-    console.log(`  CREATE  state/workers/${name}/settings.json`);
 
     // -----------------------------------------------------------------------
-    // Git worktree
+    // Git worktree (skip for no-worktree roles)
     // -----------------------------------------------------------------------
-    if (args.projectRepo) {
+    if (args.projectRepo && !NO_WORKTREE_ROLES.has(agentRole)) {
       const repoPath = resolve(args.projectRepo);
       const worktreePath = join(worktreesRoot, name);
       const branch = `${branchPrefix}${name}`;
@@ -838,7 +818,7 @@ function generateSingleBot(args: Args): void {
   // -------------------------------------------------------------------------
 
   const agentsPath = join(stateRoot, "agents.json");
-  writeAgentsJson(stateRoot, names, args.agentRoles, agentsPath);
+  writeAgentsJson(stateRoot, names, args.agentRoles, agentsPath, args.agentDomains);
 
   // -------------------------------------------------------------------------
   // Summary

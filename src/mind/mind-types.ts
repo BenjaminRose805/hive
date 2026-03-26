@@ -39,7 +39,7 @@ export interface ReaderRegistry {
 // Inbox Messages (stored in inbox/{agent}/)
 // ---------------------------------------------------------------------------
 
-export type InboxPriority = "breaking" | "update" | "nudge" | "question" | "info"
+export type InboxPriority = "info" | "alert" | "response" | "critical"
 
 export interface InboxMessage {
   id: string
@@ -137,9 +137,8 @@ export interface CliError {
 // ---------------------------------------------------------------------------
 
 export const PRIORITY_ORDER: Record<InboxPriority, number> = {
-  breaking: 0,
-  update: 1,
-  nudge: 2,
-  question: 3,
-  info: 4,
+  critical: 0,
+  alert: 1,
+  response: 2,
+  info: 3,
 }

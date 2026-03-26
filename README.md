@@ -1,18 +1,15 @@
 # Hive
 
-Multi-session Claude Code orchestrator. Launches a team of AI agents that coordinate via Discord, each running in an isolated Docker container with its own git worktree.
+Multi-session Claude Code orchestrator. Launches a team of AI agents that coordinate via Discord, each running in a tmux window with a dedicated git worktree.
 
 ```
-Host
-├── hive-gateway.ts          ← Discord bot (single process)
-├── hive-mind.ts             ← Shared memory daemon
-│
-├── hive-alice (container)   ← Docker, --network=none
-│   └── claude --bypassPermissions
-├── hive-bob (container)
-│   └── claude --bypassPermissions
-└── hive-carol (container)
-    └── claude --bypassPermissions
+tmux session (hive-myapp)
+├── window 0: gateway         ← Discord bot
+├── window 1: mind            ← Shared memory daemon
+├── window 2: manager         ← Coordinator
+├── window 3: alice           ← claude --bypassPermissions
+├── window 4: bob             ← claude --bypassPermissions
+└── window 5: carol           ← claude --bypassPermissions
 ```
 
 ## Setup
@@ -26,7 +23,7 @@ source ~/.bashrc
 hive register-commands   # register Discord slash commands
 ```
 
-**Requirements:** Bun, Docker, tmux, Claude Code CLI, a Discord bot token.
+**Requirements:** Bun, tmux, Claude Code CLI, a Discord bot token.
 
 ## Configuration
 
@@ -74,7 +71,7 @@ Any field in `defaults` applies to all projects unless overridden.
 
 ```bash
 hive up myapp              # launch from config
-hive down myapp            # stop containers + tmux
+hive down myapp            # stop all agents + tmux
 hive fresh myapp           # clean slate, relaunch
 hive status                # show running hives
 hive attach myapp          # reattach tmux session
@@ -110,20 +107,11 @@ Options: `--dry-run`, `--auto-resolve`, `--test-cmd CMD`
 ## How it works
 
 1. **Config** — resolves project settings, generates MCP configs
-2. **Docker** — builds `hive-worker` image (bun + git + claude CLI)
-3. **Worktrees** — `git worktree add` per agent on branch `hive/<name>`
-4. **Gateway** — starts Discord bot in tmux, waits for health check
-5. **Mind** — starts shared memory daemon
-6. **Manager** — coordinator agent that decomposes tasks
-7. **Workers** — each in a Docker container (`--network=none`), attached in tmux
-
-### Container isolation
-
-Each worker gets:
-- Its worktree (read-write)
-- `config/` (read-only)
-- Gateway socket (for Discord only)
-- No network, no host filesystem access
+2. **Worktrees** — `git worktree add` per agent on branch `hive/<name>`
+3. **Gateway** — starts Discord bot in tmux, waits for health check
+4. **Mind** — starts shared memory daemon
+5. **Manager** — coordinator agent that decomposes tasks
+6. **Workers** — each in a tmux window with its own git worktree
 
 ### tmux
 
@@ -137,7 +125,7 @@ Window 2: manager      Window 5: carol
 
 ### Multi-instance
 
-Run multiple projects simultaneously — each gets its own tmux session, gateway socket, and containers:
+Run multiple projects simultaneously — each gets its own tmux session and gateway socket:
 
 ```bash
 hive up myapp    # session: hive-myapp

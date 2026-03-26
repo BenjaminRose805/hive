@@ -14,14 +14,16 @@
 import {
   appendFileSync,
   existsSync,
+  mkdirSync,
   readdirSync,
   readFileSync,
   renameSync,
   unlinkSync,
+  writeFileSync,
   watch as fsWatch,
   type FSWatcher,
 } from "fs";
-import { join, resolve } from "path";
+import { join, resolve, dirname } from "path";
 import type {
   ChangelogEntry,
   DaemonPid,
@@ -59,6 +61,7 @@ const WATCH_ALERT_THRESHOLD_MS = 30 * 60_000;
 // ---------------------------------------------------------------------------
 
 import { ensureDir, readJSONFile, atomicWrite } from './fs-utils.ts';
+import type { AgentsJson } from '../shared/agent-types.ts';
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -84,8 +87,8 @@ function readersPath(type: string, topic: string): string {
   return join(MIND_ROOT, "readers", `${type}s`, `${topic}.json`);
 }
 
-function inboxDir(agent: string): string {
-  return join(MIND_ROOT, "inbox", agent);
+function gatewayInboxDir(agent: string): string {
+  return join(dirname(GATEWAY_SOCKET), 'inbox', 'messages', agent);
 }
 
 function watchesFile(agent: string): string {
@@ -140,14 +143,44 @@ async function writeInboxMessage(
   toAgent: string,
   msg: Omit<InboxMessage, "id" | "read" | "timestamp">,
 ): Promise<void> {
-  const full: InboxMessage = {
-    id: crypto.randomUUID(),
-    read: false,
-    timestamp: new Date().toISOString(),
-    ...msg,
+  const id = crypto.randomUUID();
+  const timestamp = new Date().toISOString();
+
+  // Write in unified inbox format (compatible with hive__check_inbox MCP tool)
+  const inboxMsg = {
+    chatId: '',
+    messageId: id,
+    user: msg.from,
+    ts: timestamp,
+    content: msg.content,
+    attachments: [],
+    source: 'mind',
+    mindType: msg.type,
+    priority: msg.priority,
+    topic: msg.topic,
   };
-  const filename = `${Date.now()}-${msg.type}.json`;
-  await atomicWrite(inboxDir(toAgent), filename, full);
+
+  const dir = gatewayInboxDir(toAgent);
+  mkdirSync(dir, { recursive: true });
+  const filename = `${Date.now()}-mind-${msg.type}.json`;
+  const tmpPath = join(dir, `.${filename}.tmp`);
+  const finalPath = join(dir, filename);
+  writeFileSync(tmpPath, JSON.stringify(inboxMsg, null, 2));
+  renameSync(tmpPath, finalPath);
+}
+
+async function nudgeWorker(agent: string, priority: string = 'info'): Promise<void> {
+  try {
+    await fetch('http://localhost/nudge', {
+      unix: GATEWAY_SOCKET,
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workerId: agent, priority }),
+      signal: AbortSignal.timeout(PUSH_TIMEOUT_MS),
+    } as any);
+  } catch {
+    // Best-effort — gateway may not be running yet during startup
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -280,7 +313,7 @@ async function notifyStaleReaders(
 
   for (const reader of registry.readers) {
     if (reader.read_version < newVersion && reader.agent !== author) {
-      const priority: InboxPriority = breaking ? "breaking" : "update";
+      const priority: InboxPriority = breaking ? "alert" : "info";
       await writeInboxMessage(reader.agent, {
         from: "hive-mind",
         type: "mind-update",
@@ -290,6 +323,7 @@ async function notifyStaleReaders(
         old_version: reader.read_version,
         new_version: newVersion,
       });
+      await nudgeWorker(reader.agent, breaking ? 'alert' : 'info');
       await pushDiscordNotification(
         reader.agent, `${type}s/${topic}`, newVersion,
         breaking ?? false,
@@ -315,10 +349,11 @@ async function resolveWatchesForTopic(type: string, topic: string): Promise<void
         await writeInboxMessage(agent, {
           from: "hive-mind",
           type: "watch-resolved",
-          priority: "update",
+          priority: "response",
           topic: `${type}s/${topic}`,
           content: `Watch resolved: ${type} "${topic}" is now available`,
         });
+        await nudgeWorker(agent, 'response');
         await pushDiscordNotification(
           agent, `${type}s/${topic}`, 0, false,
           `${type}s/${topic} is now available (watch resolved)`,
@@ -412,12 +447,13 @@ async function processDelta(delta: DeltaFile): Promise<void> {
         await writeInboxMessage(agent, {
           from: "hive-mind",
           type: "conflict",
-          priority: "breaking",
+          priority: "alert",
           topic: `${type}s/${topic}`,
           content: `Version conflict on ${type} "${topic}": you expected v${delta.version_expecting} but current is v${existing.version}. Your changes were applied (last-writer-wins) as v${newVersion}.`,
           old_version: existing.version,
           new_version: newVersion,
         });
+        await nudgeWorker(agent, 'alert');
       }
 
       // Last-writer-wins merge
@@ -549,10 +585,11 @@ async function processDelta(delta: DeltaFile): Promise<void> {
           await writeInboxMessage(agent, {
             from: "hive-mind",
             type: "watch-resolved",
-            priority: "update",
+            priority: "response",
             topic: `${type}s/${topic}`,
             content: `Watch resolved: ${type} "${topic}" already exists (v${entry.version})`,
           });
+          await nudgeWorker(agent, 'response');
         }
       }
       break;
@@ -634,6 +671,21 @@ async function processAllPending(): Promise<void> {
 }
 
 // ---------------------------------------------------------------------------
+// Manager name resolver
+// ---------------------------------------------------------------------------
+
+const HIVE_DIR = PROJECT_ROOT
+
+function resolveManagerName(): string {
+  try {
+    const agentsPath = join(HIVE_DIR, 'state', 'agents.json')
+    const data = JSON.parse(readFileSync(agentsPath, 'utf8')) as AgentsJson
+    const manager = data.agents.find(a => a.role === 'manager')
+    return manager?.name ?? 'manager'
+  } catch { return 'manager' }
+}
+
+// ---------------------------------------------------------------------------
 // Watch monitor
 // ---------------------------------------------------------------------------
 
@@ -661,10 +713,11 @@ async function runWatchMonitor(): Promise<void> {
           await writeInboxMessage(agent, {
             from: "hive-mind",
             type: "watch-resolved",
-            priority: "update",
+            priority: "response",
             topic: topicKey,
             content: `Watch resolved: ${w.type} "${w.topic}" is now available (v${entry.version})`,
           });
+          await nudgeWorker(agent, 'response');
           await pushDiscordNotification(
             agent, topicKey, entry.version, false,
             `${topicKey} is now available (watch resolved)`,
@@ -692,18 +745,20 @@ async function runWatchMonitor(): Promise<void> {
           await writeInboxMessage(w.expect_from, {
             from: "hive-mind",
             type: "nudge",
-            priority: "nudge",
+            priority: "alert",
             topic: topicKey,
             content: `${agent} is waiting on your ${w.type} "${w.topic}" — please publish when ready`,
           });
+          await nudgeWorker(w.expect_from, 'alert');
         } else {
-          await writeInboxMessage("manager", {
+          await writeInboxMessage(resolveManagerName(), {
             from: "hive-mind",
             type: "nudge",
-            priority: "nudge",
+            priority: "alert",
             topic: topicKey,
             content: `${agent} is waiting on ${w.type} "${w.topic}" but no expected publisher specified — please advise`,
           });
+          await nudgeWorker(resolveManagerName(), 'alert');
         }
       }
     }
@@ -732,15 +787,16 @@ async function runWatchMonitor(): Promise<void> {
 
       nudgeTimestamps.set(`alert:${topicKey}`, Date.now());
 
-      await writeInboxMessage("manager", {
+      await writeInboxMessage(resolveManagerName(), {
         from: "hive-mind",
         type: "nudge",
-        priority: "breaking",
+        priority: "critical",
         topic: topicKey,
         content: `SYSTEMIC BLOCK: ${agents.length} workers (${agents.join(", ")}) waiting on ${topicKey} for 30+ min — possible decomposition issue`,
       });
+      await nudgeWorker(resolveManagerName(), 'critical');
       await pushDiscordNotification(
-        'manager', topicKey, 0, true,
+        resolveManagerName(), topicKey, 0, true,
         `Systemic block: ${agents.length} agents waiting on ${topicKey} for >30m`,
       )
     }
@@ -850,7 +906,6 @@ function ensureMindDirs(): void {
     join(MIND_ROOT, "decisions"),
     join(MIND_ROOT, "pending"),
     join(MIND_ROOT, "pending", ".failed"),
-    join(MIND_ROOT, "inbox"),
     join(MIND_ROOT, "agents"),
     join(MIND_ROOT, "readers"),
     join(MIND_ROOT, "readers", "contracts"),
