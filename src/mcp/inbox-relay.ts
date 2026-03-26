@@ -335,7 +335,11 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
     }
     case 'hive__create_channel': {
       const topic = args.topic as string
-      const participants = args.participants as string[]
+      let participants = args.participants
+      // MCP clients may stringify array arguments — parse if needed
+      if (typeof participants === 'string') {
+        try { participants = JSON.parse(participants) } catch { /* leave as-is, will fail validation below */ }
+      }
       const message = args.message as string | undefined
       if (!topic) throw new Error('topic is required')
       if (!Array.isArray(participants) || participants.length === 0) throw new Error('participants is required (non-empty array)')
