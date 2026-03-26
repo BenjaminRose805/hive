@@ -8,6 +8,9 @@
     "gateway": "bun run bin/hive-gateway.ts",
     "mind": "bun run bin/hive-mind.ts",
     "validate": "bun run bin/hive validate",
+    "lint": "biome check .",
+    "lint:fix": "biome check --fix .",
+    "format": "biome format --write .",
     "test": "bun test"
   },
   "dependencies": {
@@ -17,6 +20,7 @@
     "discord.js": "^14.25.1"
   },
   "devDependencies": {
+    "@biomejs/biome": "^2.4.9",
     "bun-types": "latest"
   }
 }

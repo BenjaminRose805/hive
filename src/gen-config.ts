@@ -5,11 +5,11 @@
  * Supports named agents (--agents) or numeric workers (--workers N).
  */
 
-import { existsSync, mkdirSync, writeFileSync, readFileSync, readdirSync } from "fs";
-import { resolve, join, dirname } from "path";
-import { execSync } from "child_process";
-import { NO_WORKTREE_ROLES, type AgentEntry, type AgentsJson } from './shared/agent-types.ts';
-import { parseAgentAssignment, validateRole, validateDomain } from './shared/validation.ts';
+import { execSync } from "node:child_process";
+import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { type AgentEntry, type AgentsJson, NO_WORKTREE_ROLES } from "./shared/agent-types.ts";
+import { parseAgentAssignment, validateDomain, validateRole } from "./shared/validation.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -17,7 +17,7 @@ import { parseAgentAssignment, validateRole, validateDomain } from './shared/val
 
 export interface Args {
   workers: number;
-  agentNames: string[] | null;   // null = use numeric worker-NN names
+  agentNames: string[] | null; // null = use numeric worker-NN names
   agentRoles: Map<string, string>;
   agentDomains: Map<string, string>;
   channelId: string;
@@ -25,7 +25,7 @@ export interface Args {
   botId: string;
   projectRepo: string | null;
   branchPrefix: string;
-  branchPrefixExplicit: boolean;  // was --branch-prefix explicitly set?
+  branchPrefixExplicit: boolean; // was --branch-prefix explicitly set?
   budget: number;
   toolOverrides: Map<string, ToolOverride>;
   help: boolean;
@@ -198,12 +198,18 @@ function parseArgs(argv: string[]): Args {
         args.workers = parseInt(argv[++i], 10);
         break;
       case "--agents": {
-        const names = argv[++i].split(",").map((s) => s.trim()).filter(Boolean);
+        const names = argv[++i]
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
         args.agentNames = names;
         break;
       }
       case "--roles": {
-        const pairs = argv[++i].split(",").map((s) => s.trim()).filter(Boolean);
+        const pairs = argv[++i]
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
         for (const pair of pairs) {
           const { name, role, domain } = parseAgentAssignment(pair);
           validateRole(role);
@@ -233,11 +239,16 @@ function parseArgs(argv: string[]): Args {
         args.budget = parseFloat(argv[++i]);
         break;
       case "--tools": {
-        const specs = argv[++i].split(",").map(s => s.trim()).filter(Boolean);
+        const specs = argv[++i]
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
         for (const spec of specs) {
           const colon = spec.indexOf(":");
           if (colon === -1) {
-            console.error(`ERROR: Invalid --tools entry "${spec}". Expected format: name:+tool1+tool2`);
+            console.error(
+              `ERROR: Invalid --tools entry "${spec}". Expected format: name:+tool1+tool2`,
+            );
             process.exit(1);
           }
           const agentName = spec.slice(0, colon).trim();
@@ -255,7 +266,10 @@ function parseArgs(argv: string[]): Args {
           }
           // else: bare names default to "add"
 
-          const tools = toolSpec.split("+").map(s => s.trim()).filter(Boolean);
+          const tools = toolSpec
+            .split("+")
+            .map((s) => s.trim())
+            .filter(Boolean);
           args.toolOverrides.set(agentName, { mode, tools });
         }
         break;
@@ -278,13 +292,13 @@ function validateAgentNames(names: string[]): void {
   for (const name of names) {
     if (!AGENT_NAME_RE.test(name)) {
       console.error(
-        `ERROR: Invalid agent name "${name}". Names must be alphanumeric + hyphens only, 1-32 characters.`
+        `ERROR: Invalid agent name "${name}". Names must be alphanumeric + hyphens only, 1-32 characters.`,
       );
       process.exit(1);
     }
     if (RESERVED_NAMES.has(name.toLowerCase())) {
       console.error(
-        `ERROR: Agent name "${name}" is reserved. Reserved names: ${[...RESERVED_NAMES].join(", ")}`
+        `ERROR: Agent name "${name}" is reserved. Reserved names: ${[...RESERVED_NAMES].join(", ")}`,
       );
       process.exit(1);
     }
@@ -354,7 +368,8 @@ function validate(args: Args): void {
   if (!args.channelId) errors.push("--channel-id is required");
   if (!args.token) errors.push("--token is required");
   // --bot-id is optional — the gateway discovers it at runtime from client.user.id
-  if (isNaN(args.workers) || args.workers < 1) errors.push("--workers must be a positive integer");
+  if (Number.isNaN(args.workers) || args.workers < 1)
+    errors.push("--workers must be a positive integer");
 
   if (errors.length > 0) {
     for (const e of errors) console.error(`ERROR: ${e}`);
@@ -381,14 +396,14 @@ export function ensureDir(dir: string): void {
 }
 
 export function writeJson(filePath: string, data: unknown): void {
-  writeFileSync(filePath, JSON.stringify(data, null, 2) + "\n", "utf-8");
+  writeFileSync(filePath, `${JSON.stringify(data, null, 2)}\n`, "utf-8");
 }
 
 export function loadToolDefinitions(toolsDir: string): Map<string, ToolDefinition> {
   const defs = new Map<string, ToolDefinition>();
   if (!existsSync(toolsDir)) return defs;
 
-  const files = readdirSync(toolsDir).filter(f => f.endsWith(".json"));
+  const files = readdirSync(toolsDir).filter((f) => f.endsWith(".json"));
   for (const file of files) {
     try {
       const raw = readFileSync(join(toolsDir, file), "utf-8");
@@ -453,7 +468,7 @@ export function loadSecrets(secretsPath: string): Record<string, string> {
 
 export function interpolateEnv(
   env: Record<string, string>,
-  secrets: Record<string, string>
+  secrets: Record<string, string>,
 ): Record<string, string> {
   const result: Record<string, string> = {};
   for (const [key, value] of Object.entries(env)) {
@@ -470,7 +485,7 @@ export function resolveToolsForRole(
   toolDefs: Map<string, ToolDefinition>,
   profilesDir: string,
   secrets: Record<string, string>,
-  toolOverrides: Map<string, ToolOverride>
+  toolOverrides: Map<string, ToolOverride>,
 ): Record<string, McpServerEntry> {
   const profile = loadToolProfile(profilesDir, role);
   let toolNames = [...profile.tools];
@@ -480,16 +495,22 @@ export function resolveToolsForRole(
   if (override) {
     switch (override.mode) {
       case "replace":
-        console.log(`  TOOLS  Agent ${agentName}: replacing role '${role}' tools [${toolNames.join(", ")}] with [${override.tools.join(", ")}]`);
+        console.log(
+          `  TOOLS  Agent ${agentName}: replacing role '${role}' tools [${toolNames.join(", ")}] with [${override.tools.join(", ")}]`,
+        );
         toolNames = [...override.tools];
         break;
       case "add":
-        console.log(`  TOOLS  Agent ${agentName}: adding [${override.tools.join(", ")}] to role '${role}' tools [${toolNames.join(", ")}]`);
-        toolNames = [...toolNames, ...override.tools.filter(t => !toolNames.includes(t))];
+        console.log(
+          `  TOOLS  Agent ${agentName}: adding [${override.tools.join(", ")}] to role '${role}' tools [${toolNames.join(", ")}]`,
+        );
+        toolNames = [...toolNames, ...override.tools.filter((t) => !toolNames.includes(t))];
         break;
       case "remove":
-        console.log(`  TOOLS  Agent ${agentName}: removing [${override.tools.join(", ")}] from role '${role}' tools [${toolNames.join(", ")}]`);
-        toolNames = toolNames.filter(t => !override.tools.includes(t));
+        console.log(
+          `  TOOLS  Agent ${agentName}: removing [${override.tools.join(", ")}] from role '${role}' tools [${toolNames.join(", ")}]`,
+        );
+        toolNames = toolNames.filter((t) => !override.tools.includes(t));
         break;
     }
   }
@@ -499,19 +520,23 @@ export function resolveToolsForRole(
   for (const toolName of toolNames) {
     const def = toolDefs.get(toolName);
     if (!def) {
-      console.warn(`  WARN  Tool '${toolName}' referenced by role '${role}' not found in config/tools/ — skipping`);
+      console.warn(
+        `  WARN  Tool '${toolName}' referenced by role '${role}' not found in config/tools/ — skipping`,
+      );
       continue;
     }
 
     // Check required env vars
     const resolvedEnv = interpolateEnv(def.env, secrets);
-    const missingEnv = def.requiredEnv.filter(varName => {
+    const missingEnv = def.requiredEnv.filter((varName) => {
       const val = secrets[varName] ?? process.env[varName];
       return !val;
     });
 
     if (missingEnv.length > 0) {
-      console.warn(`  WARN  Tool '${toolName}' skipped for agent '${agentName}': missing required env vars: ${missingEnv.join(", ")}`);
+      console.warn(
+        `  WARN  Tool '${toolName}' skipped for agent '${agentName}': missing required env vars: ${missingEnv.join(", ")}`,
+      );
       continue;
     }
 
@@ -530,12 +555,12 @@ export function resolveToolsForRole(
 }
 
 export function buildRelayMcpConfig(
-  stateDir: string,
+  _stateDir: string,
   workerId: string,
-  workerSocketPath: string,
+  _workerSocketPath: string,
   channelId: string,
-  mentionPatterns: string,
-  requireMention: boolean,
+  _mentionPatterns: string,
+  _requireMention: boolean,
   roleTools?: Record<string, McpServerEntry>,
   gatewaySocket?: string,
 ): McpConfigJson {
@@ -545,7 +570,8 @@ export function buildRelayMcpConfig(
         command: "bun",
         args: ["run", DISCORD_RELAY_PATH],
         env: {
-          HIVE_GATEWAY_SOCKET: gatewaySocket ?? process.env.HIVE_GATEWAY_SOCKET ?? "/tmp/hive-gateway/gateway.sock",
+          HIVE_GATEWAY_SOCKET:
+            gatewaySocket ?? process.env.HIVE_GATEWAY_SOCKET ?? "/tmp/hive-gateway/gateway.sock",
           HIVE_WORKER_ID: workerId,
           HIVE_CHANNEL_ID: channelId,
         },
@@ -555,18 +581,23 @@ export function buildRelayMcpConfig(
         args: ["run", INBOX_RELAY_PATH],
         env: {
           HIVE_INBOX_DIR: join(
-            dirname(gatewaySocket ?? process.env.HIVE_GATEWAY_SOCKET ?? "/tmp/hive-gateway/gateway.sock"),
+            dirname(
+              gatewaySocket ?? process.env.HIVE_GATEWAY_SOCKET ?? "/tmp/hive-gateway/gateway.sock",
+            ),
             "inbox",
             "messages",
             workerId,
           ),
           HIVE_INBOX_ROOT: join(
-            dirname(gatewaySocket ?? process.env.HIVE_GATEWAY_SOCKET ?? "/tmp/hive-gateway/gateway.sock"),
+            dirname(
+              gatewaySocket ?? process.env.HIVE_GATEWAY_SOCKET ?? "/tmp/hive-gateway/gateway.sock",
+            ),
             "inbox",
             "messages",
           ),
           HIVE_WORKER_ID: workerId,
-          HIVE_GATEWAY_SOCKET: gatewaySocket ?? process.env.HIVE_GATEWAY_SOCKET ?? "/tmp/hive-gateway/gateway.sock",
+          HIVE_GATEWAY_SOCKET:
+            gatewaySocket ?? process.env.HIVE_GATEWAY_SOCKET ?? "/tmp/hive-gateway/gateway.sock",
         },
       },
       ...(roleTools ?? {}),
@@ -578,11 +609,7 @@ export function buildRelayMcpConfig(
 // Worktree management
 // ---------------------------------------------------------------------------
 
-export function addWorktree(
-  projectRepo: string,
-  worktreePath: string,
-  branch: string
-): void {
+export function addWorktree(projectRepo: string, worktreePath: string, branch: string): void {
   if (existsSync(worktreePath)) {
     console.warn(`  SKIP  Worktree already exists: ${worktreePath}`);
     return;
@@ -601,15 +628,13 @@ export function addWorktree(
 
   try {
     if (branchExists) {
-      execSync(
-        `git -C "${projectRepo}" worktree add "${worktreePath}" "${branch}"`,
-        { stdio: "pipe" }
-      );
+      execSync(`git -C "${projectRepo}" worktree add "${worktreePath}" "${branch}"`, {
+        stdio: "pipe",
+      });
     } else {
-      execSync(
-        `git -C "${projectRepo}" worktree add -b "${branch}" "${worktreePath}"`,
-        { stdio: "pipe" }
-      );
+      execSync(`git -C "${projectRepo}" worktree add -b "${branch}" "${worktreePath}"`, {
+        stdio: "pipe",
+      });
     }
     console.log(`  CREATE  Worktree: ${worktreePath} (branch: ${branch})`);
   } catch (err: unknown) {
@@ -634,13 +659,8 @@ export function loadOrCreateAgentsJson(agentsPath: string): AgentsJson {
   return { agents: [], created: new Date().toISOString(), mode: "single-bot" };
 }
 
-export function mergeAgentsJson(
-  existing: AgentsJson,
-  newAgents: AgentEntry[]
-): AgentsJson {
-  const existingByName = new Map<string, AgentEntry>(
-    existing.agents.map((a) => [a.name, a])
-  );
+export function mergeAgentsJson(existing: AgentsJson, newAgents: AgentEntry[]): AgentsJson {
+  const existingByName = new Map<string, AgentEntry>(existing.agents.map((a) => [a.name, a]));
 
   for (const agent of newAgents) {
     const existing = existingByName.get(agent.name);
@@ -662,11 +682,11 @@ export function mergeAgentsJson(
 }
 
 export function writeAgentsJson(
-  stateRoot: string,
+  _stateRoot: string,
   agentNames: string[],
   agentRoles: Map<string, string>,
   agentsPath: string,
-  agentDomains: Map<string, string> = new Map()
+  agentDomains: Map<string, string> = new Map(),
 ): void {
   const now = new Date().toISOString();
   const newAgents: AgentEntry[] = agentNames.map((name) => {
@@ -708,22 +728,24 @@ function generateSingleBot(args: Args): void {
   const secrets = loadSecrets(secretsPath);
 
   if (toolDefs.size > 0) {
-    console.log(`  TOOLS  Loaded ${toolDefs.size} tool definition(s): ${[...toolDefs.keys()].join(", ")}`);
+    console.log(
+      `  TOOLS  Loaded ${toolDefs.size} tool definition(s): ${[...toolDefs.keys()].join(", ")}`,
+    );
   }
 
   // -------------------------------------------------------------------------
   // Build gateway worker list
   // -------------------------------------------------------------------------
 
-  const gatewayWorkers: GatewayWorkerConfig[] = names.map(name => {
-    const role = args.agentRoles.get(name) ?? 'engineer';
+  const gatewayWorkers: GatewayWorkerConfig[] = names.map((name) => {
+    const role = args.agentRoles.get(name) ?? "engineer";
     const domain = args.agentDomains.get(name);
-    const isManager = role === 'manager';
+    const isManager = role === "manager";
     return {
       workerId: name,
       socketPath: `/tmp/hive-gateway/${name}.sock`,
       channelId: "",
-      mentionPatterns: isManager ? [name, 'hive'] : [name, 'all-workers'],
+      mentionPatterns: isManager ? [name, "hive"] : [name, "all-workers"],
       requireMention: !isManager,
       role,
       ...(domain ? { domain } : {}),
@@ -759,8 +781,15 @@ function generateSingleBot(args: Args): void {
     ensureDir(workerDir);
 
     const agentRole = args.agentRoles.get(name) ?? "engineer";
-    const isManager = agentRole === 'manager';
-    const roleTools = resolveToolsForRole(agentRole, name, toolDefs, profilesDir, secrets, args.toolOverrides);
+    const isManager = agentRole === "manager";
+    const roleTools = resolveToolsForRole(
+      agentRole,
+      name,
+      toolDefs,
+      profilesDir,
+      secrets,
+      args.toolOverrides,
+    );
 
     const workerAccess: AccessJson = {
       dmPolicy: "disabled",
@@ -785,8 +814,8 @@ function generateSingleBot(args: Args): void {
         args.channelId,
         isManager ? `${name},hive` : `${name},all-workers`,
         !isManager,
-        roleTools
-      )
+        roleTools,
+      ),
     );
 
     console.log(`  CREATE  state/workers/${name}/access.json`);
@@ -798,18 +827,18 @@ function generateSingleBot(args: Args): void {
         hooks: {
           PreToolUse: [
             {
-              matcher: 'Write|Edit|Bash',
+              matcher: "Write|Edit|Bash",
               hooks: [
                 {
-                  type: 'command',
-                  command: `node "${join(HIVE_ROOT, 'hooks', 'check-scope.mjs')}"`,
+                  type: "command",
+                  command: `node "${join(HIVE_ROOT, "hooks", "check-scope.mjs")}"`,
                 },
               ],
             },
           ],
         },
-      }
-      writeFileSync(join(workerDir, 'settings.json'), JSON.stringify(workerSettings, null, 2))
+      };
+      writeFileSync(join(workerDir, "settings.json"), JSON.stringify(workerSettings, null, 2));
       console.log(`  CREATE  state/workers/${name}/settings.json`);
     }
 

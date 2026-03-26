@@ -2,8 +2,8 @@
  * fs-utils.ts — Shared filesystem utility functions for hive-mind CLI and daemon.
  */
 
-import { existsSync, mkdirSync, readFileSync, renameSync } from "fs";
-import { join } from "path";
+import { existsSync, mkdirSync, readFileSync, renameSync } from "node:fs";
+import { join } from "node:path";
 
 export function ensureDir(dir: string): void {
   if (!existsSync(dir)) {
