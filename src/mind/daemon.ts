@@ -14,16 +14,16 @@
 import {
   appendFileSync,
   existsSync,
+  type FSWatcher,
+  watch as fsWatch,
   mkdirSync,
   readdirSync,
   readFileSync,
   renameSync,
   unlinkSync,
   writeFileSync,
-  watch as fsWatch,
-  type FSWatcher,
-} from "fs";
-import { join, resolve, dirname } from "path";
+} from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import type {
   ChangelogEntry,
   DaemonPid,
@@ -49,8 +49,8 @@ const WATCH_MONITOR_INTERVAL_MS = 60_000;
 const GIT_SNAPSHOT_INTERVAL_MS = 300_000;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
-const GATEWAY_SOCKET = process.env.HIVE_GATEWAY_SOCKET ?? '/tmp/hive-gateway/gateway.sock'
-const PUSH_TIMEOUT_MS = 5_000
+const GATEWAY_SOCKET = process.env.HIVE_GATEWAY_SOCKET ?? "/tmp/hive-gateway/gateway.sock";
+const PUSH_TIMEOUT_MS = 5_000;
 
 const NUDGE_COOLDOWN_MS = 15 * 60_000; // 15 minutes
 const WATCH_NUDGE_THRESHOLD_MS = 15 * 60_000;
@@ -60,8 +60,8 @@ const WATCH_ALERT_THRESHOLD_MS = 30 * 60_000;
 // Filesystem helpers
 // ---------------------------------------------------------------------------
 
-import { ensureDir, readJSONFile, atomicWrite } from './fs-utils.ts';
-import type { AgentsJson } from '../shared/agent-types.ts';
+import type { AgentsJson } from "../shared/agent-types.ts";
+import { atomicWrite, ensureDir, readJSONFile } from "./fs-utils.ts";
 
 // ---------------------------------------------------------------------------
 // Path helpers
@@ -83,15 +83,15 @@ function canonicalDir(type: string): string {
   return join(MIND_ROOT, `${type}s`);
 }
 
-function readersPath(type: string, topic: string): string {
+function _readersPath(type: string, topic: string): string {
   return join(MIND_ROOT, "readers", `${type}s`, `${topic}.json`);
 }
 
 function gatewayInboxDir(agent: string): string {
-  return join(dirname(GATEWAY_SOCKET), 'inbox', 'messages', agent);
+  return join(dirname(GATEWAY_SOCKET), "inbox", "messages", agent);
 }
 
-function watchesFile(agent: string): string {
+function _watchesFile(agent: string): string {
   return join(MIND_ROOT, "watches", `${agent}.json`);
 }
 
@@ -148,13 +148,13 @@ async function writeInboxMessage(
 
   // Write in unified inbox format (compatible with hive__check_inbox MCP tool)
   const inboxMsg = {
-    chatId: '',
+    chatId: "",
     messageId: id,
     user: msg.from,
     ts: timestamp,
     content: msg.content,
     attachments: [],
-    source: 'mind',
+    source: "mind",
     mindType: msg.type,
     priority: msg.priority,
     topic: msg.topic,
@@ -169,12 +169,12 @@ async function writeInboxMessage(
   renameSync(tmpPath, finalPath);
 }
 
-async function nudgeWorker(agent: string, priority: string = 'info'): Promise<void> {
+async function nudgeWorker(agent: string, priority: string = "info"): Promise<void> {
   try {
-    await fetch('http://localhost/nudge', {
+    await fetch("http://localhost/nudge", {
       unix: GATEWAY_SOCKET,
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ workerId: agent, priority }),
       signal: AbortSignal.timeout(PUSH_TIMEOUT_MS),
     } as any);
@@ -198,27 +198,29 @@ async function pushDiscordNotification(
   const message = [
     `CONTRACT_UPDATE | ${targetAgent} | ${topic}`,
     `Version: ${version}`,
-    `Breaking: ${isBreaking ? 'yes' : 'no'}`,
+    `Breaking: ${isBreaking ? "yes" : "no"}`,
     `Summary: ${summary}`,
-  ].join('\n')
+  ].join("\n");
 
   try {
-    const resp = await fetch('http://localhost/send', {
+    const resp = await fetch("http://localhost/send", {
       unix: GATEWAY_SOCKET,
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        chat_id: 'auto',
+        chat_id: "auto",
         text: message,
         target_agent: targetAgent,
       }),
       signal: AbortSignal.timeout(PUSH_TIMEOUT_MS),
-    })
+    });
     if (!resp.ok) {
-      process.stderr.write(`[hive-mind-daemon] Discord push failed (${resp.status}): ${await resp.text()}\n`)
+      process.stderr.write(
+        `[hive-mind-daemon] Discord push failed (${resp.status}): ${await resp.text()}\n`,
+      );
     }
   } catch {
-    process.stderr.write(`[hive-mind-daemon] Gateway unavailable, using inbox-only notification\n`)
+    process.stderr.write(`[hive-mind-daemon] Gateway unavailable, using inbox-only notification\n`);
   }
 }
 
@@ -231,7 +233,7 @@ function appendChangelog(entry: ChangelogEntry): void {
   ensureDir(dir);
   const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
   const filePath = join(dir, `${date}.jsonl`);
-  appendFileSync(filePath, JSON.stringify(entry) + "\n");
+  appendFileSync(filePath, `${JSON.stringify(entry)}\n`);
   changesSinceSnapshot = true;
 }
 
@@ -250,7 +252,7 @@ function loadReadersFromDisk(): void {
   for (const typeDir of readdirSync(readersRoot)) {
     const typePath = join(readersRoot, typeDir);
     try {
-      const stat = Bun.file(typePath);
+      const _stat = Bun.file(typePath);
       // Skip if not a directory-like path (we check by listing)
       const files = readdirSync(typePath);
       for (const file of files) {
@@ -323,12 +325,14 @@ async function notifyStaleReaders(
         old_version: reader.read_version,
         new_version: newVersion,
       });
-      await nudgeWorker(reader.agent, breaking ? 'alert' : 'info');
+      await nudgeWorker(reader.agent, breaking ? "alert" : "info");
       await pushDiscordNotification(
-        reader.agent, `${type}s/${topic}`, newVersion,
+        reader.agent,
+        `${type}s/${topic}`,
+        newVersion,
         breaking ?? false,
         `${type}s/${topic} updated to v${newVersion}`,
-      )
+      );
     }
   }
 }
@@ -353,11 +357,14 @@ async function resolveWatchesForTopic(type: string, topic: string): Promise<void
           topic: `${type}s/${topic}`,
           content: `Watch resolved: ${type} "${topic}" is now available`,
         });
-        await nudgeWorker(agent, 'response');
+        await nudgeWorker(agent, "response");
         await pushDiscordNotification(
-          agent, `${type}s/${topic}`, 0, false,
+          agent,
+          `${type}s/${topic}`,
+          0,
+          false,
           `${type}s/${topic} is now available (watch resolved)`,
-        )
+        );
       }
     }
     if (changed) {
@@ -453,7 +460,7 @@ async function processDelta(delta: DeltaFile): Promise<void> {
           old_version: existing.version,
           new_version: newVersion,
         });
-        await nudgeWorker(agent, 'alert');
+        await nudgeWorker(agent, "alert");
       }
 
       // Last-writer-wins merge
@@ -563,7 +570,7 @@ async function processDelta(delta: DeltaFile): Promise<void> {
 
       // Check if already watching this topic
       const existingIdx = watches.findIndex(
-        (w) => w.topic === delta.watch!.topic && w.type === delta.watch!.type,
+        (w) => w.topic === delta.watch?.topic && w.type === delta.watch?.type,
       );
       if (existingIdx >= 0) {
         watches[existingIdx] = delta.watch;
@@ -589,7 +596,7 @@ async function processDelta(delta: DeltaFile): Promise<void> {
             topic: `${type}s/${topic}`,
             content: `Watch resolved: ${type} "${topic}" already exists (v${entry.version})`,
           });
-          await nudgeWorker(agent, 'response');
+          await nudgeWorker(agent, "response");
         }
       }
       break;
@@ -622,13 +629,19 @@ async function processAllPending(): Promise<void> {
         const raw = readFileSync(filePath, "utf-8");
         delta = JSON.parse(raw) as DeltaFile;
       } catch (err) {
-        process.stderr.write(`[hive-mind-daemon] Failed to parse ${file}: ${(err as Error).message}\n`);
+        process.stderr.write(
+          `[hive-mind-daemon] Failed to parse ${file}: ${(err as Error).message}\n`,
+        );
         ensureDir(failedDir());
         try {
           renameSync(filePath, join(failedDir(), file));
         } catch {
           // If rename fails, try to just remove it
-          try { unlinkSync(filePath); } catch { /* abandon */ }
+          try {
+            unlinkSync(filePath);
+          } catch {
+            /* abandon */
+          }
         }
         continue;
       }
@@ -674,15 +687,17 @@ async function processAllPending(): Promise<void> {
 // Manager name resolver
 // ---------------------------------------------------------------------------
 
-const HIVE_DIR = PROJECT_ROOT
+const HIVE_DIR = PROJECT_ROOT;
 
 function resolveManagerName(): string {
   try {
-    const agentsPath = join(HIVE_DIR, 'state', 'agents.json')
-    const data = JSON.parse(readFileSync(agentsPath, 'utf8')) as AgentsJson
-    const manager = data.agents.find(a => a.role === 'manager')
-    return manager?.name ?? 'manager'
-  } catch { return 'manager' }
+    const agentsPath = join(HIVE_DIR, "state", "agents.json");
+    const data = JSON.parse(readFileSync(agentsPath, "utf8")) as AgentsJson;
+    const manager = data.agents.find((a) => a.role === "manager");
+    return manager?.name ?? "manager";
+  } catch {
+    return "manager";
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -717,11 +732,14 @@ async function runWatchMonitor(): Promise<void> {
             topic: topicKey,
             content: `Watch resolved: ${w.type} "${w.topic}" is now available (v${entry.version})`,
           });
-          await nudgeWorker(agent, 'response');
+          await nudgeWorker(agent, "response");
           await pushDiscordNotification(
-            agent, topicKey, entry.version, false,
+            agent,
+            topicKey,
+            entry.version,
+            false,
             `${topicKey} is now available (watch resolved)`,
-          )
+          );
           continue;
         }
       }
@@ -732,7 +750,7 @@ async function runWatchMonitor(): Promise<void> {
       if (!waitingPerTopic.has(topicKey)) {
         waitingPerTopic.set(topicKey, []);
       }
-      waitingPerTopic.get(topicKey)!.push(agent);
+      waitingPerTopic.get(topicKey)?.push(agent);
 
       // Nudge after 15 minutes
       if (waitMs > WATCH_NUDGE_THRESHOLD_MS) {
@@ -749,7 +767,7 @@ async function runWatchMonitor(): Promise<void> {
             topic: topicKey,
             content: `${agent} is waiting on your ${w.type} "${w.topic}" — please publish when ready`,
           });
-          await nudgeWorker(w.expect_from, 'alert');
+          await nudgeWorker(w.expect_from, "alert");
         } else {
           await writeInboxMessage(resolveManagerName(), {
             from: "hive-mind",
@@ -758,7 +776,7 @@ async function runWatchMonitor(): Promise<void> {
             topic: topicKey,
             content: `${agent} is waiting on ${w.type} "${w.topic}" but no expected publisher specified — please advise`,
           });
-          await nudgeWorker(resolveManagerName(), 'alert');
+          await nudgeWorker(resolveManagerName(), "alert");
         }
       }
     }
@@ -772,9 +790,7 @@ async function runWatchMonitor(): Promise<void> {
     let allLong = true;
     for (const agent of agents) {
       const watches = watchCache.get(agent) ?? [];
-      const w = watches.find(
-        (w) => w.status === "waiting" && `${w.type}s/${w.topic}` === topicKey,
-      );
+      const w = watches.find((w) => w.status === "waiting" && `${w.type}s/${w.topic}` === topicKey);
       if (!w || Date.now() - new Date(w.since).getTime() < WATCH_ALERT_THRESHOLD_MS) {
         allLong = false;
         break;
@@ -794,11 +810,14 @@ async function runWatchMonitor(): Promise<void> {
         topic: topicKey,
         content: `SYSTEMIC BLOCK: ${agents.length} workers (${agents.join(", ")}) waiting on ${topicKey} for 30+ min — possible decomposition issue`,
       });
-      await nudgeWorker(resolveManagerName(), 'critical');
+      await nudgeWorker(resolveManagerName(), "critical");
       await pushDiscordNotification(
-        resolveManagerName(), topicKey, 0, true,
+        resolveManagerName(),
+        topicKey,
+        0,
+        true,
         `Systemic block: ${agents.length} agents waiting on ${topicKey} for >30m`,
-      )
+      );
     }
   }
 }
@@ -814,7 +833,8 @@ function runGitSnapshot(): void {
     // Stage only durable knowledge directories
     const addResult = Bun.spawnSync({
       cmd: [
-        "git", "add",
+        "git",
+        "add",
         join(MIND_ROOT, "contracts"),
         join(MIND_ROOT, "decisions"),
         join(MIND_ROOT, "agents"),
@@ -844,11 +864,7 @@ function runGitSnapshot(): void {
 
     const date = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
     const commitResult = Bun.spawnSync({
-      cmd: [
-        "git", "commit",
-        "-m", `mind: snapshot ${date}`,
-        "--no-verify",
-      ],
+      cmd: ["git", "commit", "-m", `mind: snapshot ${date}`, "--no-verify"],
       cwd: PROJECT_ROOT,
       stderr: "pipe",
     });
@@ -955,14 +971,18 @@ async function startup(): Promise<void> {
       }
     });
   } catch (err) {
-    process.stderr.write(`[hive-mind-daemon] fs.watch failed, relying on polling: ${(err as Error).message}\n`);
+    process.stderr.write(
+      `[hive-mind-daemon] fs.watch failed, relying on polling: ${(err as Error).message}\n`,
+    );
   }
 
   // Polling fallback (belt-and-suspenders)
   pollTimer = setInterval(() => {
     if (!shuttingDown) {
       processAllPending().catch((err) => {
-        process.stderr.write(`[hive-mind-daemon] Poll processing error: ${(err as Error).message}\n`);
+        process.stderr.write(
+          `[hive-mind-daemon] Poll processing error: ${(err as Error).message}\n`,
+        );
       });
     }
   }, POLL_INTERVAL_MS);

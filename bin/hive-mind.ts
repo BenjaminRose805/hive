@@ -14,18 +14,9 @@
  *   view         --agent <name>
  */
 
-import {
-  existsSync,
-  readdirSync,
-  unlinkSync,
-} from "fs";
-import { join, resolve } from "path";
-import type {
-  CliError,
-  DeltaFile,
-  MindEntry,
-  WatchEntry,
-} from "../src/mind/mind-types";
+import { existsSync, readdirSync, unlinkSync } from "node:fs";
+import { join, resolve } from "node:path";
+import type { CliError, DeltaFile, MindEntry, WatchEntry } from "../src/mind/mind-types";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -54,7 +45,7 @@ const MIND_ROOT = join(PROJECT_ROOT, ".hive", "mind");
 
 function cliError(error: string, code: number, detail: string): never {
   const err: CliError = { error, code, detail };
-  process.stderr.write(JSON.stringify(err) + "\n");
+  process.stderr.write(`${JSON.stringify(err)}\n`);
   process.exit(code);
 }
 
@@ -101,7 +92,7 @@ function validateJSON(data: string | undefined): unknown {
 // Filesystem helpers
 // ---------------------------------------------------------------------------
 
-import { readJSONFile, atomicWrite } from '../src/mind/fs-utils.ts';
+import { atomicWrite, readJSONFile } from "../src/mind/fs-utils.ts";
 
 function timeSince(isoDate: string): string {
   const ms = Date.now() - new Date(isoDate).getTime();
@@ -184,7 +175,10 @@ function parseArgs(argv: string[]): ParsedArgs {
         result.breaking = true;
         break;
       case "--tags":
-        result.tags = (args[++i] ?? "").split(",").map((t) => t.trim()).filter(Boolean);
+        result.tags = (args[++i] ?? "")
+          .split(",")
+          .map((t) => t.trim())
+          .filter(Boolean);
         break;
       case "--expect-from":
         result.expectFrom = args[++i];
@@ -277,7 +271,7 @@ async function cmdRead(args: ParsedArgs): Promise<void> {
 /** list — list all contracts or decisions */
 function cmdList(args: ParsedArgs): void {
   // Accept plural or singular
-  let rawType = args.type;
+  const rawType = args.type;
   if (!rawType) cliError("missing_type", 1, "--type contracts|decisions is required");
 
   // Normalize: ensure we get the plural directory name
@@ -314,7 +308,11 @@ function cmdList(args: ParsedArgs): void {
   }
 
   if (entries.length === 0) {
-    console.log(args.author ? `No ${singular}s found by author "${args.author}"` : `No ${singular}s published yet`);
+    console.log(
+      args.author
+        ? `No ${singular}s found by author "${args.author}"`
+        : `No ${singular}s published yet`,
+    );
     return;
   }
 
@@ -322,7 +320,7 @@ function cmdList(args: ParsedArgs): void {
 
   console.log(`\n${singular.charAt(0).toUpperCase() + singular.slice(1)}s (${entries.length}):\n`);
   console.log("  TOPIC                          AUTHOR               VERSION  UPDATED");
-  console.log("  " + "-".repeat(78));
+  console.log(`  ${"-".repeat(78)}`);
   for (const e of entries) {
     const topicCol = e.topic.padEnd(30);
     const authorCol = e.author.padEnd(20);
@@ -399,7 +397,10 @@ function cmdLoad(args: ParsedArgs): void {
 
   // --- Personal context ---
   const context = readJSONFile(join(agDir, "context.json")) as Record<string, unknown> | null;
-  const preferences = readJSONFile(join(agDir, "preferences.json")) as Record<string, unknown> | null;
+  const preferences = readJSONFile(join(agDir, "preferences.json")) as Record<
+    string,
+    unknown
+  > | null;
   const history = readJSONFile(join(agDir, "history.json")) as unknown[] | null;
 
   lines.push("## Last Session");
@@ -603,7 +604,7 @@ async function cmdSave(args: ParsedArgs): Promise<void> {
     }
     await atomicWrite(dir, "history.json", entries);
     console.log(
-      `Saved ${incoming.length} history entry(ies) for agent "${agent}" (total: ${entries.length}, cap: ${HISTORY_CAP})`
+      `Saved ${incoming.length} history entry(ies) for agent "${agent}" (total: ${entries.length}, cap: ${HISTORY_CAP})`,
     );
     return;
   }
@@ -756,7 +757,7 @@ Commands:
   save          --agent <name> --type context|preferences|history --data '<json>'
   clear         --agent <name> [--type <type>]
   view          --agent <name>
-  daemon        Start the Hive Mind daemon process`
+  daemon        Start the Hive Mind daemon process`,
       );
       if (args.subcommand) {
         console.error(`\nUnknown command: "${args.subcommand}"`);
