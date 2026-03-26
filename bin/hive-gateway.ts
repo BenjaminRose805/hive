@@ -465,8 +465,9 @@ async function routeInbound(msg: Message, excludeSender?: string): Promise<void>
     writeToInbox(worker.workerId, inboxMsg)
 
     // Use shouldNudge + debounce instead of direct nudgeViaTmux
-    // Human messages bypass status-based suppression (always nudge)
-    if ((isHumanMessage || shouldNudge(worker)) && !shouldDebounceNudge(worker.workerId)) {
+    // Human messages and manager role bypass status-based suppression (always nudge)
+    const alwaysNudge = isHumanMessage || worker.role === 'manager'
+    if ((alwaysNudge || shouldNudge(worker)) && !shouldDebounceNudge(worker.workerId)) {
       const ok = await nudgeViaTmux(worker.workerId)
       if (ok) {
         process.stderr.write(`hive-gateway: delivered message to ${worker.workerId} inbox + nudge\n`)
