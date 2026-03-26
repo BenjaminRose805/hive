@@ -489,7 +489,6 @@ function prepareWorker(
   const scriptPath = join(getStateDir(), `.launch-worker-${name}.sh`);
   const settingsPath = join(getStateDir(), "workers", name, "settings.json");
   const settingsFlag = existsSync(settingsPath) ? `\\\n  --settings "${settingsPath}"` : "";
-  const budgetFlag = args.budget > 0 ? `\\\n  --max-cost-usd ${args.budget}` : "";
   const script = `#!/usr/bin/env bash
 # Prevent parent Claude Code from suppressing child instances
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
@@ -499,7 +498,7 @@ cd '${workDir}'
 '${resolveClaudePath()}' --name "hive-${name}" \\
   --append-system-prompt-file '${promptFile}' \\
   --mcp-config "${join(getStateDir(), "workers", name, "mcp-config.json")}" \\
-  --strict-mcp-config ${settingsFlag} ${budgetFlag} \\
+  --strict-mcp-config ${settingsFlag} \\
   --permission-mode bypassPermissions
 `;
   writeFileSync(scriptPath, script);
