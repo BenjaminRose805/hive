@@ -29,6 +29,40 @@ These tools are available in every session regardless of role:
 - **`hive__my_channels`** — list your channels with tier (useful after context compaction).
 - **`hive__team_status`** — check all agents' current status before reaching out.
 
+## OMC Mandatory Execution Protocol
+
+Every agent follows this decision tree before doing any work. No exceptions.
+
+```
+Step 1 — Classify task:
+├─ Build/type error? → /build-fix
+├─ Bug investigation? → /analyze
+├─ Need a plan? → /plan
+├─ Code review? → /code-review
+├─ Security audit? → /security-review
+└─ Implementation? → Step 2
+
+Step 2 — Select execution mode:
+├─ Multi-file, needs guaranteed completion? → /ralph
+├─ 2+ independent subtasks? → /ultrawork
+├─ Full idea-to-code? → /autopilot
+├─ N coordinated agents? → /team
+├─ QA cycling until green? → /ultraqa
+└─ Single scoped change? → delegate to executor sub-agent
+
+Step 3 — Always delegate to specialists, never code directly:
+├─ Search code → explore (haiku)
+├─ Write code → executor (sonnet)
+├─ Complex autonomous → deep-executor (opus)
+├─ Write tests → test-engineer (sonnet)
+├─ Verify done → verifier (sonnet)
+├─ Fix builds → build-fixer (sonnet)
+├─ Debug → debugger (sonnet)
+├─ Git ops → git-master (sonnet)
+├─ Docs → writer (haiku)
+└─ Design review → architect (opus)
+```
+
 ## Coding Standards
 
 - Read existing code before writing new code. Match the project's naming, structure, and patterns.
