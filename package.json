@@ -8,10 +8,12 @@
     "gateway": "bun run bin/hive-gateway.ts",
     "mind": "bun run bin/hive-mind.ts",
     "validate": "bun run bin/hive validate",
+    "typecheck": "tsc --noEmit",
     "lint": "biome check .",
     "lint:fix": "biome check --fix .",
     "format": "biome format --write .",
-    "test": "bun test"
+    "test": "bun test",
+    "ci": "bun run typecheck && bun run lint && bun test"
   },
   "dependencies": {
     "@discordjs/rest": "^2.6.1",
