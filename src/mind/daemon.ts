@@ -678,7 +678,7 @@ const HIVE_DIR = PROJECT_ROOT
 
 function resolveManagerName(): string {
   try {
-    const agentsPath = join(HIVE_DIR, 'state', 'agents.json')
+    const agentsPath = join(process.env.HIVE_STATE_DIR ?? join(HIVE_DIR, 'state'), 'agents.json')
     const data = JSON.parse(readFileSync(agentsPath, 'utf8')) as AgentsJson
     const manager = data.agents.find(a => a.role === 'manager')
     return manager?.name ?? 'manager'

@@ -1,7 +1,7 @@
 import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { run } from '../shared/subprocess'
-import { SESSION, stateDir, agentsJsonPath } from '../shared/paths'
+import { getSession, getStateDir, getAgentsJsonPath } from '../shared/paths'
 import type { AgentsJson } from '../shared/agent-types'
 
 export async function main(_args: string[]): Promise<void> {
@@ -10,15 +10,16 @@ export async function main(_args: string[]): Promise<void> {
   // Load channel map if available
   let channels: Record<string, string> = {}
   try {
-    const channelsPath = join(stateDir, 'gateway', 'channels.json')
+    const channelsPath = join(getStateDir(), 'gateway', 'channels.json')
     if (existsSync(channelsPath)) {
       channels = JSON.parse(readFileSync(channelsPath, 'utf8'))
     }
   } catch {}
 
   // Agents
-  if (existsSync(agentsJsonPath)) {
-    const data: AgentsJson = JSON.parse(readFileSync(agentsJsonPath, 'utf8'))
+  const ajPath = getAgentsJsonPath()
+  if (existsSync(ajPath)) {
+    const data: AgentsJson = JSON.parse(readFileSync(ajPath, 'utf8'))
     if (data.agents?.length) {
       hasAnything = true
       console.log('Agents:')
@@ -31,10 +32,11 @@ export async function main(_args: string[]): Promise<void> {
   }
 
   // Tmux windows
-  const tmux = run(['tmux', 'list-windows', '-t', SESSION])
+  const session = getSession()
+  const tmux = run(['tmux', 'list-windows', '-t', session])
   if (tmux.exitCode === 0 && tmux.stdout) {
     hasAnything = true
-    console.log(`Tmux (${SESSION}):`)
+    console.log(`Tmux (${session}):`)
     for (const line of tmux.stdout.split('\n')) {
       console.log(`  ${line}`)
     }

@@ -47,7 +47,8 @@ const MAX_CHUNK = 2000
 
 // HIVE_ROOT is the project root (directory containing bin/, state/, worktrees/)
 const HIVE_ROOT = import.meta.dir ? join(import.meta.dir, '..') : process.cwd()
-const AGENTS_JSON = join(HIVE_ROOT, 'state', 'agents.json')
+const STATE_DIR = process.env.HIVE_STATE_DIR ?? join(HIVE_ROOT, 'state')
+const AGENTS_JSON = join(STATE_DIR, 'agents.json')
 
 const ADMIN_USER_IDS = new Set(
   (process.env.HIVE_ADMIN_IDS ?? '').split(',').filter(Boolean)
@@ -127,7 +128,7 @@ function isChannelMember(channelId: string, workerId: string): boolean {
 
 function persistConversationChannels(): void {
   try {
-    const dir = join(HIVE_ROOT, 'state', 'gateway')
+    const dir = join(STATE_DIR, 'gateway')
     mkdirSync(dir, { recursive: true })
     const serialized: Record<string, any> = {}
     for (const [channelId, convo] of conversationChannels) {
@@ -147,7 +148,7 @@ function persistConversationChannels(): void {
   } catch {}
 }
 
-const GATEWAY_CONFIG_PATH = join(HIVE_ROOT, 'state', 'gateway', 'config.json')
+const GATEWAY_CONFIG_PATH = join(STATE_DIR, 'gateway', 'config.json')
 const GATEWAY_CONFIG_DATA = (() => {
   try {
     if (existsSync(GATEWAY_CONFIG_PATH)) {
@@ -544,7 +545,7 @@ async function ensureWorkerChannels(): Promise<Map<string, string>> {
   const guild = (dashboardCh as any).guild
 
   // Check if channels.json from a previous run has valid channel IDs
-  const channelsJsonPath = join(HIVE_ROOT, 'state', 'gateway', 'channels.json')
+  const channelsJsonPath = join(STATE_DIR, 'gateway', 'channels.json')
   if (existsSync(channelsJsonPath)) {
     try {
       const stored: Record<string, string> = JSON.parse(readFileSync(channelsJsonPath, 'utf8'))
@@ -609,7 +610,7 @@ async function ensureWorkerChannels(): Promise<Map<string, string>> {
 
   // Persist category ID in gateway config for teardown
   try {
-    const gwConfigPath = join(HIVE_ROOT, 'state', 'gateway', 'config.json')
+    const gwConfigPath = join(STATE_DIR, 'gateway', 'config.json')
     if (existsSync(gwConfigPath)) {
       const config = JSON.parse(readFileSync(gwConfigPath, 'utf8'))
       config.categoryId = category.id
@@ -677,7 +678,7 @@ function readAgentsJson(): AgentsJson | null {
 }
 
 function writeAgentsJson(data: AgentsJson): void {
-  mkdirSync(join(HIVE_ROOT, 'state'), { recursive: true })
+  mkdirSync(STATE_DIR, { recursive: true })
   writeFileSync(AGENTS_JSON, JSON.stringify(data, null, 2))
 }
 
@@ -984,15 +985,15 @@ async function handleSlashSpinUp(interaction: ChatInputCommandInteraction): Prom
     } catch { /* mind not available yet, continue without */ }
 
     // Write system prompt to a temp file for the agent
-    const promptFile = join(HIVE_ROOT, 'state', `.prompt-${agentName}.md`)
+    const promptFile = join(STATE_DIR, `.prompt-${agentName}.md`)
     writeFileSync(promptFile, systemPrompt)
 
     // Build MCP config path (reuse existing worker config if present)
-    const mcpConfigPath = join(HIVE_ROOT, 'state', 'workers', agentName, 'mcp-config.json')
-    const settingsPath = join(HIVE_ROOT, 'state', 'workers', agentName, 'settings.json')
+    const mcpConfigPath = join(STATE_DIR, 'workers', agentName, 'mcp-config.json')
+    const settingsPath = join(STATE_DIR, 'workers', agentName, 'settings.json')
 
     // Write a bash launch script for this agent
-    const stateDir = join(HIVE_ROOT, 'state')
+    const stateDir = STATE_DIR
     mkdirSync(stateDir, { recursive: true })
     const scriptPath = join(stateDir, `.launch-gateway-${agentName}.sh`)
     const mcpConfigArg = existsSync(mcpConfigPath) ? `--mcp-config "${mcpConfigPath}"` : ''
@@ -1074,7 +1075,7 @@ async function handleSlashSpinUp(interaction: ChatInputCommandInteraction): Prom
           const worker = workers.get(agentName)
           if (worker) worker.channelId = ch.id
           workerChannelMap.set(agentName, ch.id)
-          writeFileSync(join(HIVE_ROOT, 'state', 'gateway', 'channels.json'),
+          writeFileSync(join(STATE_DIR, 'gateway', 'channels.json'),
             JSON.stringify(Object.fromEntries(workerChannelMap), null, 2))
         }
       }
@@ -2007,15 +2008,15 @@ client.once('ready', async (c) => {
   process.stderr.write(`hive-gateway: gateway connected as ${c.user.tag}\n`)
   try {
     workerChannelMap = await ensureWorkerChannels()
-    writeFileSync(join(HIVE_ROOT, 'state', 'gateway', 'channels.json'),
+    writeFileSync(join(STATE_DIR, 'gateway', 'channels.json'),
       JSON.stringify(Object.fromEntries(workerChannelMap), null, 2))
     channelsReady = true
     process.stderr.write(`hive-gateway: ${workerChannelMap.size} worker channels ready\n`)
 
     // Load existing conversation channels from a previous run
     try {
-      const ccPath = join(HIVE_ROOT, 'state', 'gateway', 'conversation-channels.json')
-      const tcPath = join(HIVE_ROOT, 'state', 'gateway', 'task-channels.json')
+      const ccPath = join(STATE_DIR, 'gateway', 'conversation-channels.json')
+      const tcPath = join(STATE_DIR, 'gateway', 'task-channels.json')
 
       if (existsSync(ccPath)) {
         // New format: channelId → { name, active[], observing[], taskId?, ... }
@@ -2074,7 +2075,7 @@ client.once('ready', async (c) => {
         if (!worker.channelId) worker.channelId = DASHBOARD_CHANNEL_ID
         workerChannelMap.set(worker.workerId, DASHBOARD_CHANNEL_ID)
       }
-      writeFileSync(join(HIVE_ROOT, 'state', 'gateway', 'channels.json'),
+      writeFileSync(join(STATE_DIR, 'gateway', 'channels.json'),
         JSON.stringify(Object.fromEntries(workerChannelMap), null, 2))
       channelsReady = true
     } else {

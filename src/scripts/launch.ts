@@ -7,7 +7,7 @@
 import { existsSync, readFileSync, writeFileSync, unlinkSync, readdirSync, copyFileSync, chmodSync } from 'fs'
 import { join, resolve } from 'path'
 import { homedir } from 'os'
-import { HIVE_DIR, getSession, getGatewaySocket, getGatewayDir, stateDir, worktreesDir, configDir, agentsJsonPath, pidsJsonPath } from '../shared/paths.ts'
+import { HIVE_DIR, getSession, getGatewaySocket, getGatewayDir, getStateDir, getAgentsJsonPath, getPidsJsonPath, worktreesDir, configDir } from '../shared/paths.ts'
 import { run, runOrDie } from '../shared/subprocess.ts'
 import { validateSafeName, validateAgentNames, parseAgentAssignment, validateRole, validateDomain } from '../shared/validation.ts'
 import { loadConfig, resolveProject } from '../shared/project-config.ts'
@@ -138,12 +138,13 @@ function resolveToken(args: LaunchArgs): string {
 // ---------------------------------------------------------------------------
 
 function launchGateway(token: string): string {
-  const scriptPath = join(stateDir, '.launch-gateway.sh')
+  const scriptPath = join(getStateDir(), '.launch-gateway.sh')
   // Single-quoted heredoc prevents expansion; token passed via env
   const script = `#!/usr/bin/env bash
 export DISCORD_BOT_TOKEN='${token.replace(/'/g, "'\\''")}'
 export HIVE_DIR='${HIVE_DIR}'
 export HIVE_GATEWAY_SOCKET='${getGatewaySocket()}'
+export HIVE_STATE_DIR='${getStateDir()}'
 bun run "$HIVE_DIR/bin/hive-gateway.ts" 2>&1
 echo "[hive] Gateway exited with code $?"
 read -p "Press enter to close..."
@@ -201,8 +202,9 @@ read -p "Press enter to close..."
 // ---------------------------------------------------------------------------
 
 function launchMind(): void {
-  const scriptPath = join(stateDir, '.launch-mind.sh')
+  const scriptPath = join(getStateDir(), '.launch-mind.sh')
   const script = `#!/usr/bin/env bash
+export HIVE_STATE_DIR='${getStateDir()}'
 bun run "${HIVE_DIR}/bin/hive-mind.ts" daemon 2>&1
 `
   writeFileSync(scriptPath, script)
@@ -359,7 +361,7 @@ function launchWorker(name: string, role: string, domain: string | undefined, pe
 
   // Compose and write system prompt
   const prompt = composeSystemPrompt(name, role, domain, team, personality)
-  const promptFile = join(stateDir, `.prompt-${name}.md`)
+  const promptFile = join(getStateDir(), `.prompt-${name}.md`)
   writeFileSync(promptFile, prompt)
 
   // Install pre-commit hook (worktree roles only — worktree .git is a file pointing to real gitdir)
@@ -377,8 +379,8 @@ function launchWorker(name: string, role: string, domain: string | undefined, pe
   }
 
   // Write launch script (host-direct)
-  const scriptPath = join(stateDir, `.launch-worker-${name}.sh`)
-  const settingsPath = join(stateDir, 'workers', name, 'settings.json')
+  const scriptPath = join(getStateDir(), `.launch-worker-${name}.sh`)
+  const settingsPath = join(getStateDir(), 'workers', name, 'settings.json')
   const settingsFlag = existsSync(settingsPath) ? `\\\n  --settings "${settingsPath}"` : ''
   const script = `#!/usr/bin/env bash
 # Prevent parent Claude Code from suppressing child instances
@@ -388,7 +390,7 @@ export HIVE_ROOT='${workDir}'
 cd '${workDir}'
 '${resolveClaudePath()}' --name "hive-${name}" \\
   --append-system-prompt-file '${promptFile}' \\
-  --mcp-config "${join(stateDir, 'workers', name, 'mcp-config.json')}" \\
+  --mcp-config "${join(getStateDir(), 'workers', name, 'mcp-config.json')}" \\
   --strict-mcp-config ${settingsFlag} \\
   --permission-mode bypassPermissions
 `
@@ -424,7 +426,7 @@ cd '${workDir}'
   // Read per-worker channel ID from gateway channels.json if available
   let workerChannelId = args.channelId
   try {
-    const channelsPath = join(stateDir, 'gateway', 'channels.json')
+    const channelsPath = join(getStateDir(), 'gateway', 'channels.json')
     if (existsSync(channelsPath)) {
       const channels = JSON.parse(readFileSync(channelsPath, 'utf8'))
       if (channels[name]) workerChannelId = channels[name]
@@ -467,8 +469,8 @@ function doTeardown(clean: boolean): void {
   if (clean) {
     try {
       const token = resolveTokenSafe()
-      const channelsPath = join(stateDir, 'gateway', 'channels.json')
-      const gwConfigPath = join(stateDir, 'gateway', 'config.json')
+      const channelsPath = join(getStateDir(), 'gateway', 'channels.json')
+      const gwConfigPath = join(getStateDir(), 'gateway', 'config.json')
       if (token && existsSync(channelsPath) && existsSync(gwConfigPath)) {
         const channels: Record<string, string> = JSON.parse(readFileSync(channelsPath, 'utf8'))
         const gwConfig = JSON.parse(readFileSync(gwConfigPath, 'utf8'))
@@ -477,8 +479,8 @@ function doTeardown(clean: boolean): void {
             `https://discord.com/api/v10/channels/${channelId}`])
         }
         // Delete conversation channels (new format: keyed by channelId)
-        const convChannelsPath = join(stateDir, 'gateway', 'conversation-channels.json')
-        const taskChannelsPath = join(stateDir, 'gateway', 'task-channels.json')
+        const convChannelsPath = join(getStateDir(), 'gateway', 'conversation-channels.json')
+        const taskChannelsPath = join(getStateDir(), 'gateway', 'task-channels.json')
         if (existsSync(convChannelsPath)) {
           try {
             const convChannels: Record<string, unknown> = JSON.parse(readFileSync(convChannelsPath, 'utf8'))
@@ -544,29 +546,29 @@ function doTeardown(clean: boolean): void {
   }
 
   // 4. Remove launch scripts, prompt files, and stale container configs
-  if (existsSync(stateDir)) {
+  if (existsSync(getStateDir())) {
     try {
-      for (const f of readdirSync(stateDir)) {
+      for (const f of readdirSync(getStateDir())) {
         if (f.startsWith('.launch-') && f.endsWith('.sh') || f.startsWith('.prompt-') && f.endsWith('.md') || f.startsWith('.container-')) {
-          unlinkSync(join(stateDir, f))
+          unlinkSync(join(getStateDir(), f))
         }
       }
     } catch { /* state dir may not exist */ }
   }
 
   // 5. Update agents.json statuses
-  if (existsSync(agentsJsonPath)) {
+  if (existsSync(getAgentsJsonPath())) {
     try {
-      const data = JSON.parse(readFileSync(agentsJsonPath, 'utf8')) as AgentsJson
+      const data = JSON.parse(readFileSync(getAgentsJsonPath(), 'utf8')) as AgentsJson
       const now = new Date().toISOString()
       data.agents = data.agents.map(a => ({ ...a, status: 'stopped', lastActive: now }))
-      writeFileSync(agentsJsonPath, JSON.stringify(data, null, 2) + '\n')
+      writeFileSync(getAgentsJsonPath(), JSON.stringify(data, null, 2) + '\n')
     } catch { /* ignore */ }
   }
 
   // 6. Clear pids.json
-  if (existsSync(pidsJsonPath)) {
-    writeFileSync(pidsJsonPath, '{}\n')
+  if (existsSync(getPidsJsonPath())) {
+    writeFileSync(getPidsJsonPath(), '{}\n')
   }
 
   if (clean) {
@@ -663,7 +665,7 @@ function generateConfigs(names: string[], roles: Map<string, string>, args: Laun
   })
 
   // Write gateway config
-  const gatewayConfigDir = join(stateDir, 'gateway')
+  const gatewayConfigDir = join(getStateDir(), 'gateway')
   ensureDir(gatewayConfigDir)
   writeJson(join(gatewayConfigDir, 'config.json'), {
     botToken: '(from DISCORD_BOT_TOKEN env var)',
@@ -677,7 +679,7 @@ function generateConfigs(names: string[], roles: Map<string, string>, args: Laun
 
   // Per-agent configs (including manager)
   for (const name of names) {
-    const workerDir = join(stateDir, 'workers', name)
+    const workerDir = join(getStateDir(), 'workers', name)
     ensureDir(workerDir)
     const role = roles.get(name) ?? 'engineer'
     const isManager = role === 'manager'
@@ -702,7 +704,7 @@ function generateConfigs(names: string[], roles: Map<string, string>, args: Laun
   }
 
   // Write agents.json
-  writeAgentsJson(stateDir, names, roles, agentsJsonPath, args.domains)
+  writeAgentsJson(getStateDir(), names, roles, getAgentsJsonPath(), args.domains)
 
   console.log(`[hive] Generated configs for ${names.length} agents`)
 }
@@ -779,7 +781,7 @@ async function launchHive(args: LaunchArgs): Promise<void> {
     // Update all agent MCP configs (including manager)
     for (const name of args.agents) {
       const channelId = workerChannels[name] ?? args.channelId
-      const workerDir = join(stateDir, 'workers', name)
+      const workerDir = join(getStateDir(), 'workers', name)
       const role = args.roles.get(name) ?? 'engineer'
       const isManager = role === 'manager'
       const roleTools = resolveToolsForRole(role, name, toolDefs, profilesDir, secrets, toolOverrides)
@@ -811,7 +813,7 @@ async function launchHive(args: LaunchArgs): Promise<void> {
   }
 
   // Write pids.json
-  writeJson(pidsJsonPath, {
+  writeJson(getPidsJsonPath(), {
     mode: 'tmux',
     session: getSession(),
     started: new Date().toISOString(),
@@ -846,9 +848,10 @@ export async function projectUp(args: string[]): Promise<void> {
   const projectName = args[0]
   if (!projectName) throw new Error('Project name required: hive up <project>')
 
-  // Set per-project isolation env vars (read by paths.ts on next import)
+  // Set per-project isolation env vars (read by paths.ts getters)
   process.env.HIVE_SESSION = `hive-${projectName}`
   process.env.HIVE_GATEWAY_SOCKET = `/tmp/hive-gateway-${projectName}/gateway.sock`
+  process.env.HIVE_STATE_DIR = join(HIVE_DIR, 'state', projectName)
 
   const config = loadConfig()
   const project = resolveProject(config, projectName)
@@ -874,6 +877,7 @@ export async function projectDown(args: string[]): Promise<void> {
   if (projectName) {
     process.env.HIVE_SESSION = `hive-${projectName}`
     process.env.HIVE_GATEWAY_SOCKET = `/tmp/hive-gateway-${projectName}/gateway.sock`
+    process.env.HIVE_STATE_DIR = join(HIVE_DIR, 'state', projectName)
   }
   doTeardown(args.includes('--clean'))
 }
@@ -883,9 +887,9 @@ export async function projectFresh(args: string[]): Promise<void> {
   doTeardown(true)
 
   // Remove state dir contents (but keep the directory)
-  if (existsSync(stateDir)) {
-    run(['rm', '-rf', stateDir])
-    ensureDir(stateDir)
+  if (existsSync(getStateDir())) {
+    run(['rm', '-rf', getStateDir()])
+    ensureDir(getStateDir())
   }
 
   await projectUp(args)
