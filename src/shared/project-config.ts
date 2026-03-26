@@ -12,6 +12,7 @@ export interface ProjectConfig {
   channel: string
   agents?: string
   roles?: string
+  personalities?: Record<string, string>
   token?: string
   tools?: string
   admin_ids?: string
@@ -48,6 +49,7 @@ export function resolveProject(config: HiveConfig, name: string): ProjectConfig 
 export function initConfig(): void {
   if (existsSync(CONFIG_PATH)) {
     console.log(`Config already exists: ${CONFIG_PATH}`)
+    console.log(`Edit it: hive edit`)
     return
   }
   mkdirSync(join(homedir(), '.config', 'hive'), { recursive: true })
@@ -59,8 +61,8 @@ export function initConfig(): void {
       example: {
         repo: '~/projects/my-app',
         channel: 'PASTE_CHANNEL_ID_HERE',
-        agents: 'alice,bob,carol',
-        roles: 'alice:developer,bob:backend-dev,carol:qa-engineer',
+        agents: 'manager,alice,bob,carol',
+        roles: 'manager:manager,alice:engineer:backend,bob:engineer:frontend,carol:qa:testing',
       },
     },
   }

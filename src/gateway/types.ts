@@ -36,9 +36,3 @@ export interface RoutingDecision {
   reason: string
 }
 
-export interface ThreadMapping {
-  taskId: string
-  threadId: string
-  agent: string
-  createdAt: string
-}

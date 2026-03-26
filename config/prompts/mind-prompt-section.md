@@ -57,22 +57,16 @@ bun run bin/hive-mind.ts check-watches --agent {NAME}
 
 The daemon monitors watches and nudges publishers when they're overdue. You'll get an inbox notification when the watched topic is published.
 
-### Inbox — Non-Interrupting Communication
+### Communication
 
-Your inbox receives notifications about mind updates, watch resolutions, and messages from teammates. **Check it after every commit or every 15 minutes**, whichever comes first.
+All messages — from Discord, from teammates, and from the Mind — arrive in your **unified inbox**. Use `hive__check_inbox` to read pending messages and `hive__send` to message teammates directly.
 
-**Before checking inbox**: save your current progress to the OMC notepad (`notepad_write_priority`). This ensures you can resume exactly where you left off after processing messages.
+The Mind sends you notifications automatically when:
+- A contract you read gets updated (stale reader notification)
+- A watch you registered gets resolved
+- A teammate needs your input (nudge)
 
-```bash
-# Check your inbox
-bun run bin/hive-mind.ts inbox --agent {NAME} --unread-only
-
-# Mark all as read after processing
-bun run bin/hive-mind.ts inbox --agent {NAME} --mark-read
-
-# Send a non-interrupting message to a teammate
-bun run bin/hive-mind.ts send --to <agent> --from {NAME} --type question --data '<json>'
-```
+You don't need to poll — you'll receive a `[hive]` nudge when new messages arrive.
 
 ### Saving Personal Context
 

@@ -23,6 +23,10 @@ export function parseHeader(content: string): ParsedHeader | null {
 
   const header: ParsedHeader = {
     type,
+    // TASK_ASSIGN, ANSWER, CONTRACT_UPDATE are coordinator-directed messages.
+    // The sender is always the coordinator role (conventionally named 'manager').
+    // If the coordinator agent is renamed, this string becomes cosmetic only —
+    // routing uses the target field (field 2), not the sender field.
     sender: isManagerDirected ? 'manager' : field2,
   }
 

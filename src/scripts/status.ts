@@ -1,10 +1,20 @@
 import { existsSync, readFileSync } from 'fs'
+import { join } from 'path'
 import { run } from '../shared/subprocess'
-import { SESSION, agentsJsonPath } from '../shared/paths'
+import { SESSION, stateDir, agentsJsonPath } from '../shared/paths'
 import type { AgentsJson } from '../shared/agent-types'
 
 export async function main(_args: string[]): Promise<void> {
   let hasAnything = false
+
+  // Load channel map if available
+  let channels: Record<string, string> = {}
+  try {
+    const channelsPath = join(stateDir, 'gateway', 'channels.json')
+    if (existsSync(channelsPath)) {
+      channels = JSON.parse(readFileSync(channelsPath, 'utf8'))
+    }
+  } catch {}
 
   // Agents
   if (existsSync(agentsJsonPath)) {
@@ -13,18 +23,10 @@ export async function main(_args: string[]): Promise<void> {
       hasAnything = true
       console.log('Agents:')
       for (const a of data.agents) {
-        console.log(`  ${a.name} (${a.role ?? 'unknown'}) — ${a.status ?? 'unknown'}`)
+        const ch = channels[a.name] ? ` [channel: ${channels[a.name]}]` : ''
+        const roleLabel = a.domain ? `${a.role}:${a.domain}` : (a.role ?? 'unknown')
+        console.log(`  ${a.name} (${roleLabel}) — ${a.status ?? 'unknown'}${ch}`)
       }
-    }
-  }
-
-  // Docker containers
-  const docker = run(['docker', 'ps', '--filter', 'name=hive-', '--format', '{{.Names}}\t{{.Status}}'])
-  if (docker.exitCode === 0 && docker.stdout) {
-    hasAnything = true
-    console.log('Containers:')
-    for (const line of docker.stdout.split('\n')) {
-      console.log(`  ${line}`)
     }
   }
 

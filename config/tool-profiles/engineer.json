@@ -1,0 +1,5 @@
+{
+  "role": "engineer",
+  "description": "Engineer — docs, HTTP, browser testing, and GitHub",
+  "tools": ["context7", "fetch", "puppeteer", "github"]
+}

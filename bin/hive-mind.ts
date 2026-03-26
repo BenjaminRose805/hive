@@ -8,8 +8,6 @@
  *   list         --type contracts|decisions [--author <name>]
  *   watch        --topic <name> --type contract|decision --agent <name> --default <string> [--expect-from <agent>]
  *   check-watches --agent <name>
- *   inbox        --agent <name> [--mark-read] [--unread-only]
- *   send         --to <name> --from <name> --type question|review-request|info --data '<json>'
  *   load         --agent <name>
  *   save         --agent <name> --type context|preferences|history --data '<json>'
  *   clear        --agent <name> [--type <type>]
@@ -19,18 +17,15 @@
 import {
   existsSync,
   readdirSync,
-  renameSync,
   unlinkSync,
 } from "fs";
 import { join, resolve } from "path";
 import type {
   CliError,
   DeltaFile,
-  InboxMessage,
   MindEntry,
   WatchEntry,
 } from "../src/mind/mind-types";
-import { PRIORITY_ORDER } from "../src/mind/mind-types";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -42,8 +37,6 @@ type SaveType = (typeof VALID_SAVE_TYPES)[number];
 
 const VALID_ENTRY_TYPES = ["contract", "decision"] as const;
 type EntryType = (typeof VALID_ENTRY_TYPES)[number];
-
-const VALID_SEND_TYPES = ["question", "review-request", "info"] as const;
 
 const TOPIC_RE = /^[a-z0-9-]+$/;
 const TOPIC_MAX = 64;
@@ -140,10 +133,6 @@ function canonicalPath(type: EntryType, topic: string): string {
 
 function agentDir(agent: string): string {
   return join(MIND_ROOT, "agents", agent);
-}
-
-function inboxDir(agent: string): string {
-  return join(MIND_ROOT, "inbox", agent);
 }
 
 function watchesFile(agent: string): string {
@@ -398,113 +387,6 @@ function cmdCheckWatches(args: ParsedArgs): void {
   console.log("");
 }
 
-/** inbox — list inbox messages sorted by priority */
-async function cmdInbox(args: ParsedArgs): Promise<void> {
-  const agent = validateAgent(args.agent);
-  const dir = inboxDir(agent);
-
-  if (!existsSync(dir)) {
-    console.log(`No inbox messages for agent "${agent}"`);
-    return;
-  }
-
-  const allFiles = readdirSync(dir).filter((f) => f.endsWith(".json"));
-  if (allFiles.length === 0) {
-    console.log(`No inbox messages for agent "${agent}"`);
-    return;
-  }
-
-  // Separate read/unread
-  const unreadFiles = allFiles.filter((f) => !f.endsWith(".read.json"));
-  const readFiles = allFiles.filter((f) => f.endsWith(".read.json"));
-
-  const filesToShow = args.unreadOnly ? unreadFiles : allFiles;
-
-  if (filesToShow.length === 0) {
-    console.log(`No unread inbox messages for agent "${agent}"`);
-    return;
-  }
-
-  // Load and sort messages
-  const messages: Array<{ file: string; msg: InboxMessage; isRead: boolean }> = [];
-  for (const file of filesToShow) {
-    const msg = readJSONFile(join(dir, file)) as InboxMessage | null;
-    if (!msg) continue;
-    const isRead = file.endsWith(".read.json");
-    messages.push({ file, msg, isRead });
-  }
-
-  // Sort by priority (breaking first), then by timestamp (newest first)
-  messages.sort((a, b) => {
-    const pa = PRIORITY_ORDER[a.msg.priority] ?? 99;
-    const pb = PRIORITY_ORDER[b.msg.priority] ?? 99;
-    if (pa !== pb) return pa - pb;
-    return b.msg.timestamp.localeCompare(a.msg.timestamp);
-  });
-
-  console.log(`\nInbox for ${agent} (${unreadFiles.length} unread, ${readFiles.length} read):\n`);
-  for (const { file, msg, isRead } of messages) {
-    const readFlag = isRead ? " [READ]" : "";
-    const priorityTag = `[${msg.priority.toUpperCase()}]`;
-    const topicInfo = msg.topic ? ` topic:${msg.topic}` : "";
-    console.log(`  ${priorityTag}${readFlag} from:${msg.from} type:${msg.type}${topicInfo} — ${timeSince(msg.timestamp)}`);
-    console.log(`    ${msg.content}`);
-  }
-  console.log("");
-
-  // --mark-read: rename unread files to .read.json
-  if (args.markRead) {
-    let marked = 0;
-    for (const file of unreadFiles) {
-      const oldPath = join(dir, file);
-      const newName = file.replace(/\.json$/, ".read.json");
-      const newPath = join(dir, newName);
-      try {
-        renameSync(oldPath, newPath);
-        marked++;
-      } catch {
-        // Ignore rename errors (file may have been processed concurrently)
-      }
-    }
-    if (marked > 0) {
-      console.log(`Marked ${marked} message(s) as read`);
-    }
-  }
-}
-
-/** send — write message to another agent's inbox using write-rename */
-async function cmdSend(args: ParsedArgs): Promise<void> {
-  const to = args.to;
-  const from = args.from;
-  if (!to) cliError("missing_to", 1, "--to <name> is required");
-  if (!from) cliError("missing_from", 1, "--from <name> is required");
-  validateAgent(to);
-  validateAgent(from);
-
-  const msgType = args.type;
-  if (!msgType) cliError("missing_type", 1, "--type question|review-request|info is required");
-  if (!VALID_SEND_TYPES.includes(msgType as any)) {
-    cliError("invalid_type", 1, `--type must be one of: ${VALID_SEND_TYPES.join(", ")}, got "${msgType}"`);
-  }
-
-  const content = validateJSON(args.data);
-
-  const message: InboxMessage = {
-    id: crypto.randomUUID(),
-    from,
-    type: msgType,
-    priority: msgType === "question" ? "question" : "info",
-    content: typeof content === "string" ? content : JSON.stringify(content),
-    read: false,
-    timestamp: new Date().toISOString(),
-  };
-
-  const filename = `${Date.now()}-${msgType}-from-${from}.json`;
-  await atomicWrite(inboxDir(to), filename, message);
-
-  console.log(JSON.stringify({ status: "sent", to, filename }));
-}
-
 /** load — generate system prompt section */
 function cmdLoad(args: ParsedArgs): void {
   const agent = validateAgent(args.agent);
@@ -618,36 +500,6 @@ function cmdLoad(args: ParsedArgs): void {
   }
 
   // --- Hive Mind sections ---
-
-  // Inbox summary
-  lines.push("## Inbox Summary");
-  const inDir = inboxDir(agent);
-  if (existsSync(inDir)) {
-    const inboxFiles = readdirSync(inDir).filter((f) => f.endsWith(".json"));
-    const unreadFiles = inboxFiles.filter((f) => !f.endsWith(".read.json"));
-    const breakingMessages: InboxMessage[] = [];
-
-    for (const file of unreadFiles) {
-      const msg = readJSONFile(join(inDir, file)) as InboxMessage | null;
-      if (msg && (msg.priority === "breaking" || msg.priority === "update")) {
-        breakingMessages.push(msg);
-      }
-    }
-
-    lines.push(`Unread messages: ${unreadFiles.length}`);
-    if (breakingMessages.length > 0) {
-      lines.push(`PRIORITY items (${breakingMessages.length}):`);
-      for (const msg of breakingMessages) {
-        lines.push(`  - [${msg.priority.toUpperCase()}] from:${msg.from} — ${msg.content}`);
-      }
-    }
-    if (unreadFiles.length === 0) {
-      lines.push("(no unread messages)");
-    }
-  } else {
-    lines.push("(no inbox)");
-  }
-  lines.push("");
 
   // Active watches
   lines.push("## Active Watches");
@@ -816,25 +668,6 @@ function cmdView(args: ParsedArgs): void {
   }
   console.log("");
 
-  // Inbox
-  console.log("--- Inbox ---");
-  const inDir = inboxDir(agent);
-  if (existsSync(inDir)) {
-    const inboxFiles = readdirSync(inDir).filter((f) => f.endsWith(".json"));
-    const unread = inboxFiles.filter((f) => !f.endsWith(".read.json"));
-    console.log(`  ${inboxFiles.length} total, ${unread.length} unread`);
-    for (const file of inboxFiles) {
-      const msg = readJSONFile(join(inDir, file)) as InboxMessage | null;
-      if (msg) {
-        const readFlag = file.endsWith(".read.json") ? " [READ]" : "";
-        console.log(`  [${msg.priority.toUpperCase()}]${readFlag} from:${msg.from} — ${msg.content}`);
-      }
-    }
-  } else {
-    console.log("  (no inbox)");
-  }
-  console.log("");
-
   // Watches
   console.log("--- Watches ---");
   const wFile = watchesFile(agent);
@@ -894,12 +727,6 @@ async function main(): Promise<void> {
     case "check-watches":
       cmdCheckWatches(args);
       break;
-    case "inbox":
-      await cmdInbox(args);
-      break;
-    case "send":
-      await cmdSend(args);
-      break;
     case "load":
       cmdLoad(args);
       break;
@@ -925,8 +752,6 @@ Commands:
   list          --type contracts|decisions [--author <name>]
   watch         --topic <name> --type contract|decision --agent <name> --default <string> [--expect-from <agent>]
   check-watches --agent <name>
-  inbox         --agent <name> [--mark-read] [--unread-only]
-  send          --to <name> --from <name> --type question|review-request|info --data '<json>'
   load          --agent <name>
   save          --agent <name> --type context|preferences|history --data '<json>'
   clear         --agent <name> [--type <type>]

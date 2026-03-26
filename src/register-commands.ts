@@ -21,13 +21,26 @@ import { ApplicationCommandOptionType, Routes } from 'discord-api-types/v10'
 // ---------------------------------------------------------------------------
 
 const ROLE_CHOICES = [
-  { name: 'Backend Developer', value: 'backend-dev' },
-  { name: 'Frontend Developer', value: 'frontend-dev' },
-  { name: 'Security Reviewer', value: 'security-reviewer' },
-  { name: 'QA Engineer', value: 'qa-engineer' },
-  { name: 'Tech Lead', value: 'tech-lead' },
+  { name: 'Manager', value: 'manager' },
+  { name: 'Architect', value: 'architect' },
+  { name: 'Engineer', value: 'engineer' },
+  { name: 'QA', value: 'qa' },
   { name: 'DevOps', value: 'devops' },
-  { name: 'Developer', value: 'developer' },
+  { name: 'Writer', value: 'writer' },
+  { name: 'Reviewer', value: 'reviewer' },
+]
+
+const DOMAIN_CHOICES = [
+  { name: 'API', value: 'api' },
+  { name: 'Auth', value: 'auth' },
+  { name: 'Data', value: 'data' },
+  { name: 'Frontend', value: 'frontend' },
+  { name: 'Backend', value: 'backend' },
+  { name: 'Security', value: 'security' },
+  { name: 'Infrastructure', value: 'infra' },
+  { name: 'CI/CD', value: 'cicd' },
+  { name: 'Performance', value: 'performance' },
+  { name: 'Testing', value: 'testing' },
 ]
 
 const commands = [
@@ -47,6 +60,13 @@ const commands = [
         description: 'Agent role profile',
         required: false,
         choices: ROLE_CHOICES,
+      },
+      {
+        type: ApplicationCommandOptionType.String,
+        name: 'domain',
+        description: 'Agent domain specialization',
+        required: false,
+        choices: DOMAIN_CHOICES,
       },
     ],
   },
@@ -137,11 +157,6 @@ const commands = [
         required: true,
       },
     ],
-  },
-  {
-    name: 'threads',
-    description: 'Show active task threads',
-    options: [],
   },
 ]
 
