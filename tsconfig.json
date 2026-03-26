@@ -10,6 +10,6 @@
     "noEmit": true,
     "baseUrl": "."
   },
-  "include": ["src/**/*.ts", "bin/**/*.ts"],
+  "include": ["src/**/*.ts", "bin/**/*.ts", "tests/**/*.ts"],
   "exclude": ["node_modules", "dist", "worktrees", "state"]
 }

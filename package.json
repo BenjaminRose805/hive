@@ -7,7 +7,8 @@
     "hive": "bun run bin/hive",
     "gateway": "bun run bin/hive-gateway.ts",
     "mind": "bun run bin/hive-mind.ts",
-    "validate": "bun run bin/hive validate"
+    "validate": "bun run bin/hive validate",
+    "test": "bun test"
   },
   "dependencies": {
     "@discordjs/rest": "^2.6.1",
