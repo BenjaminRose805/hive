@@ -19,6 +19,7 @@ import {
   addWorktree,
   buildRelayMcpConfig,
   ensureDir,
+  loadGlobalSettings,
   loadSecrets,
   loadToolDefinitions,
   resolveToolsForRole,
@@ -61,6 +62,7 @@ interface LaunchArgs {
   personalities: Record<string, string>;
   token: string;
   tools: string;
+  budget: number;
   teardown: boolean;
   clean: boolean;
 }
@@ -79,6 +81,7 @@ function parseArgs(argv: string[]): LaunchArgs {
     personalities: {},
     token: "",
     tools: "",
+    budget: 5,
     teardown: false,
     clean: false,
   };
@@ -125,6 +128,9 @@ function parseArgs(argv: string[]): LaunchArgs {
         break;
       case "--tools":
         args.tools = argv[++i];
+        break;
+      case "--budget":
+        args.budget = parseFloat(argv[++i]);
         break;
       case "--teardown":
         args.teardown = true;
@@ -468,6 +474,7 @@ function launchWorker(
   const scriptPath = join(stateDir, `.launch-worker-${name}.sh`);
   const settingsPath = join(stateDir, "workers", name, "settings.json");
   const settingsFlag = existsSync(settingsPath) ? `\\\n  --settings "${settingsPath}"` : "";
+  const budgetFlag = args.budget > 0 ? `\\\n  --max-cost-usd ${args.budget}` : "";
   const script = `#!/usr/bin/env bash
 # Prevent parent Claude Code from suppressing child instances
 unset CLAUDECODE CLAUDE_CODE_ENTRYPOINT
@@ -477,7 +484,7 @@ cd '${workDir}'
 '${resolveClaudePath()}' --name "hive-${name}" \\
   --append-system-prompt-file '${promptFile}' \\
   --mcp-config "${join(stateDir, "workers", name, "mcp-config.json")}" \\
-  --strict-mcp-config ${settingsFlag} \\
+  --strict-mcp-config ${settingsFlag} ${budgetFlag} \\
   --permission-mode bypassPermissions
 `;
   writeFileSync(scriptPath, script);
@@ -831,6 +838,9 @@ function generateConfigs(names: string[], roles: Map<string, string>, args: Laun
     workers: gatewayWorkers,
   });
 
+  // Load global settings once for all agents (OMC hooks + MCP servers)
+  const globalSettings = loadGlobalSettings();
+
   // Per-agent configs (including manager)
   for (const name of names) {
     const workerDir = join(stateDir, "workers", name);
@@ -857,26 +867,34 @@ function generateConfigs(names: string[], roles: Map<string, string>, args: Laun
         !isManager,
         roleTools,
         getGatewaySocket(),
+        globalSettings.mcpServers,
       ),
     );
 
-    // Settings with scope enforcement hook (skip for no-worktree roles)
+    // Settings with scope enforcement hook + merged global OMC hooks (skip for no-worktree roles)
     if (!NO_WORKTREE_ROLES.has(role)) {
-      writeJson(join(workerDir, "settings.json"), {
-        hooks: {
-          PreToolUse: [
-            {
-              matcher: "Write|Edit|Bash",
-              hooks: [
-                {
-                  type: "command",
-                  command: `node "${join(HIVE_DIR, "hooks", "check-scope.mjs")}"`,
-                },
-              ],
-            },
-          ],
-        },
+      const mergedHooks: Record<string, unknown[]> = {};
+
+      // Start with global hooks (OMC hooks from ~/.claude/settings.json)
+      if (globalSettings.hooks) {
+        for (const [event, entries] of Object.entries(globalSettings.hooks)) {
+          mergedHooks[event] = [...(entries as unknown[])];
+        }
+      }
+
+      // Add scope enforcement hook to PreToolUse
+      if (!mergedHooks.PreToolUse) mergedHooks.PreToolUse = [];
+      mergedHooks.PreToolUse.push({
+        matcher: "Write|Edit|Bash",
+        hooks: [
+          {
+            type: "command",
+            command: `node "${join(HIVE_DIR, "hooks", "check-scope.mjs")}"`,
+          },
+        ],
       });
+
+      writeJson(join(workerDir, "settings.json"), { hooks: mergedHooks });
     }
   }
 
@@ -993,6 +1011,7 @@ async function launchHive(args: LaunchArgs): Promise<void> {
           !isManager,
           roleTools,
           getGatewaySocket(),
+          loadGlobalSettings().mcpServers,
         ),
       );
     }
@@ -1069,6 +1088,7 @@ export async function projectUp(args: string[]): Promise<void> {
   if (project.roles) cliArgs.push("--roles", project.roles);
   if (project.token) cliArgs.push("--token", project.token);
   if (project.tools) cliArgs.push("--tools", project.tools);
+  if (project.budget != null) cliArgs.push("--budget", String(project.budget));
 
   await main(cliArgs);
 }
