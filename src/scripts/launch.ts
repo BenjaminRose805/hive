@@ -438,19 +438,32 @@ function resolveClaudePath(): string {
 // Worker launch
 // ---------------------------------------------------------------------------
 
-function launchWorker(
+// ---------------------------------------------------------------------------
+// Worker launch — split into phases for parallel startup
+// ---------------------------------------------------------------------------
+
+interface PreparedWorker {
+  name: string;
+  role: string;
+  domain: string | undefined;
+  scriptPath: string;
+  promptFile: string;
+  workDir: string;
+}
+
+/** Phase 1: Prepare configs, scripts, and hooks for a worker (no tmux, no sleeps) */
+function prepareWorker(
   name: string,
   role: string,
   domain: string | undefined,
   personality: string | undefined,
   args: LaunchArgs,
   team: TeamMember[],
-): void {
+): PreparedWorker {
   validateSafeName(name);
   validateSafeName(role);
 
   const isNoWorktreeRole = NO_WORKTREE_ROLES.has(role);
-  // No-worktree roles work from the project repo directly; worktree roles get their own directory
   const workDir = isNoWorktreeRole ? resolve(args.projectRepo) : join(worktreesDir, name);
 
   // Compose and write system prompt
@@ -458,7 +471,7 @@ function launchWorker(
   const promptFile = join(getStateDir(), `.prompt-${name}.md`);
   writeFileSync(promptFile, prompt);
 
-  // Install pre-commit hook (worktree roles only — worktree .git is a file pointing to real gitdir)
+  // Install pre-commit hook (worktree roles only)
   if (!isNoWorktreeRole) {
     const dotGitPath = join(workDir, ".git");
     if (existsSync(dotGitPath)) {
@@ -472,7 +485,7 @@ function launchWorker(
     }
   }
 
-  // Write launch script (host-direct)
+  // Write launch script
   const scriptPath = join(getStateDir(), `.launch-worker-${name}.sh`);
   const settingsPath = join(getStateDir(), "workers", name, "settings.json");
   const settingsFlag = existsSync(settingsPath) ? `\\\n  --settings "${settingsPath}"` : "";
@@ -492,56 +505,70 @@ cd '${workDir}'
   writeFileSync(scriptPath, script);
   chmodSync(scriptPath, 0o700);
 
-  // Launch in tmux
-  runOrDie(["tmux", "new-window", "-t", getSession(), "-n", name, scriptPath]);
+  return { name, role, domain, scriptPath, promptFile, workDir };
+}
+
+/** Phase 2: Create tmux window for a worker (fast, no sleep needed) */
+function spawnWorkerWindow(worker: PreparedWorker): void {
+  runOrDie(["tmux", "new-window", "-t", getSession(), "-n", worker.name, worker.scriptPath]);
+  console.log(`[hive] Spawned tmux window: ${worker.name} (${worker.role})`);
+}
+
+/** Phase 3: Handle onboarding prompts for all workers in parallel rounds */
+function onboardWorkers(workers: PreparedWorker[]): void {
+  const pending = new Set(workers.map(w => w.name));
+  const session = getSession();
+
+  // Wait for initial startup
   Bun.sleepSync(5000);
 
-  // Handle onboarding prompts (theme picker, preview confirmation, trust)
-  // Each step: capture pane, detect prompt, send input, wait
-  for (let step = 0; step < 5; step++) {
-    const pane = run(["tmux", "capture-pane", "-t", `${getSession()}:${name}`, "-p"]);
-    const text = pane.stdout.toLowerCase();
-    if (text.includes("text style") || text.includes("dark mode")) {
-      // Theme picker — option 1 (dark mode) is pre-selected, just press Enter
-      run(["tmux", "send-keys", "-t", `${getSession()}:${name}`, "", "Enter"]);
-    } else if (
-      text.includes("select login method") ||
-      text.includes("claude account with subscription")
-    ) {
-      // Login method — select option 1 (subscription)
-      run(["tmux", "send-keys", "-t", `${getSession()}:${name}`, "", "Enter"]);
-    } else if (
-      text.includes("trust") ||
-      text.includes("syntax highlighting") ||
-      text.includes("get started")
-    ) {
-      // Preview confirmation or trust prompt — press Enter to proceed
-      run(["tmux", "send-keys", "-t", `${getSession()}:${name}`, "", "Enter"]);
-    } else if (text.includes("❯") || text.includes(">")) {
-      // Claude Code interactive prompt reached
-      break;
+  for (let round = 0; round < 8 && pending.size > 0; round++) {
+    for (const name of [...pending]) {
+      const pane = run(["tmux", "capture-pane", "-t", `${session}:${name}`, "-p"]);
+      const text = pane.stdout.toLowerCase();
+      if (text.includes("text style") || text.includes("dark mode")) {
+        run(["tmux", "send-keys", "-t", `${session}:${name}`, "", "Enter"]);
+      } else if (
+        text.includes("select login method") ||
+        text.includes("claude account with subscription")
+      ) {
+        run(["tmux", "send-keys", "-t", `${session}:${name}`, "", "Enter"]);
+      } else if (
+        text.includes("trust") ||
+        text.includes("syntax highlighting") ||
+        text.includes("get started")
+      ) {
+        run(["tmux", "send-keys", "-t", `${session}:${name}`, "", "Enter"]);
+      } else if (text.includes("❯") || text.includes(">")) {
+        pending.delete(name);
+      }
     }
-    Bun.sleepSync(3000);
+    if (pending.size > 0) Bun.sleepSync(3000);
   }
+}
 
-  // Send init prompt
-  // Read per-worker channel ID from gateway channels.json if available
-  let workerChannelId = args.channelId;
+/** Phase 4: Send init prompts to all workers */
+function sendInitPrompts(workers: PreparedWorker[], args: LaunchArgs): void {
+  // Load channel map once
+  let channels: Record<string, string> = {};
   try {
     const channelsPath = join(getStateDir(), "gateway", "channels.json");
     if (existsSync(channelsPath)) {
-      const channels = JSON.parse(readFileSync(channelsPath, "utf8"));
-      if (channels[name]) workerChannelId = channels[name];
+      channels = JSON.parse(readFileSync(channelsPath, "utf8"));
     }
   } catch {}
-  const domainLabel = domain ? ` specializing in ${domain}` : "";
-  const initPrompt =
-    role === "manager"
-      ? `You are ${name}, the Hive coordinator for project repo: ${args.projectRepo}. Your Discord channel ID is ${workerChannelId}. IMPORTANT: ALWAYS use this channel ID (${workerChannelId}) as the chat_id when calling discord__reply — never use a channel ID from an incoming message. This is YOUR channel. Read state/agents.json to learn each agent's name, role, and domain. First, announce yourself on Discord with "STATUS | ${name} | - | READY" followed by a brief message with personality — you're the coordinator, set the tone for the team. Then wait for agents to announce themselves as READY. You do NOT start work autonomously — wait for the user to tell you what to build. When instructed, decompose the project into tasks and assign them to agents by name.`
-      : `You are ${name} (${role}${domainLabel}) on a Hive team with a coordinator and other agents. Your Discord channel ID is ${workerChannelId} — ALWAYS use this numeric ID (${workerChannelId}) as the chat_id when calling discord__reply, never use a channel ID from incoming messages. Announce yourself as READY on Discord with personality (see your system prompt for details) and wait for task assignment.`;
-  run(["tmux", "send-keys", "-t", `${getSession()}:${name}`, initPrompt, "Enter"]);
 
-  console.log(`[hive] Started ${name} (${role})`);
+  const session = getSession();
+  for (const w of workers) {
+    const workerChannelId = channels[w.name] ?? args.channelId;
+    const domainLabel = w.domain ? ` specializing in ${w.domain}` : "";
+    const initPrompt =
+      w.role === "manager"
+        ? `You are ${w.name}, the Hive coordinator for project repo: ${args.projectRepo}. Your Discord channel ID is ${workerChannelId}. IMPORTANT: ALWAYS use this channel ID (${workerChannelId}) as the chat_id when calling discord__reply — never use a channel ID from an incoming message. This is YOUR channel. Read state/agents.json to learn each agent's name, role, and domain. First, announce yourself on Discord with "STATUS | ${w.name} | - | READY" followed by a brief message with personality — you're the coordinator, set the tone for the team. Then wait for agents to announce themselves as READY. You do NOT start work autonomously — wait for the user to tell you what to build. When instructed, decompose the project into tasks and assign them to agents by name.`
+        : `You are ${w.name} (${w.role}${domainLabel}) on a Hive team with a coordinator and other agents. Your Discord channel ID is ${workerChannelId} — ALWAYS use this numeric ID (${workerChannelId}) as the chat_id when calling discord__reply, never use a channel ID from incoming messages. Announce yourself as READY on Discord with personality (see your system prompt for details) and wait for task assignment.`;
+    run(["tmux", "send-keys", "-t", `${session}:${w.name}`, initPrompt, "Enter"]);
+  }
+  console.log(`[hive] Sent init prompts to ${workers.length} agents`);
 }
 
 // ---------------------------------------------------------------------------
@@ -1039,13 +1066,23 @@ async function launchHive(args: LaunchArgs): Promise<void> {
     domain: args.domains.get(n),
   }));
 
-  // Launch workers
-  for (const name of args.agents) {
+  // Launch workers — phased for parallel startup
+  // Phase 1: Prepare all configs and scripts
+  const prepared: PreparedWorker[] = args.agents.map(name => {
     const role = args.roles.get(name) ?? "engineer";
     const domain = args.domains.get(name);
     const personality = args.personalities[name];
-    launchWorker(name, role, domain, personality, args, team);
-  }
+    return prepareWorker(name, role, domain, personality, args, team);
+  });
+
+  // Phase 2: Spawn all tmux windows (fast, no sleeps between them)
+  for (const w of prepared) spawnWorkerWindow(w);
+
+  // Phase 3: Handle onboarding for all agents in parallel rounds
+  onboardWorkers(prepared);
+
+  // Phase 4: Send init prompts to all agents
+  sendInitPrompts(prepared, args);
 
   // Write pids.json
   writeJson(getPidsJsonPath(), {
