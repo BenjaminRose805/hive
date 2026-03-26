@@ -8,6 +8,7 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "noEmit": true,
+    "allowImportingTsExtensions": true,
     "baseUrl": "."
   },
   "include": ["src/**/*.ts", "bin/**/*.ts", "tests/**/*.ts"],

@@ -372,7 +372,9 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
       if (Array.isArray(args.participants)) {
         participants = args.participants as string[];
       } else if (typeof args.participants === "string") {
-        try { participants = JSON.parse(args.participants); } catch {}
+        try {
+          participants = JSON.parse(args.participants);
+        } catch {}
       }
       const message = args.message as string | undefined;
       if (!topic) throw new Error("topic is required");

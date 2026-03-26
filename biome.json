@@ -34,7 +34,7 @@
     }
   },
   "files": {
-    "includes": ["src/**", "bin/**"],
+    "includes": ["src/**", "bin/**", "tests/**"],
     "ignoreUnknown": true
   }
 }

@@ -12,9 +12,9 @@ import {
   readFileSync,
   unlinkSync,
   writeFileSync,
-} from "fs";
-import { homedir } from "os";
-import { join, resolve } from "path";
+} from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 import {
   addWorktree,
   buildRelayMcpConfig,
@@ -241,7 +241,7 @@ read -p "Press enter to close..."
     if (attempt > 10) {
       const paneCheck = run(["tmux", "capture-pane", "-t", `${getSession()}:gateway`, "-p"]);
       if (paneCheck.stdout.includes("[hive] Gateway exited")) {
-        throw new Error("Gateway process crashed. Check: tmux attach -t " + getSession());
+        throw new Error(`Gateway process crashed. Check: tmux attach -t ${getSession()}`);
       }
     }
     Bun.sleepSync(1000);
@@ -358,34 +358,34 @@ function composeSystemPrompt(
   // Base profile (always included)
   const baseProfilePath = join(configDir, "prompts/profiles/_base.md");
   if (existsSync(baseProfilePath)) {
-    prompt += "\n\n" + sub(readFileSync(baseProfilePath, "utf8"));
+    prompt += `\n\n${sub(readFileSync(baseProfilePath, "utf8"))}`;
   }
 
   // Worktree-specific sections (branch discipline, scope enforcement, completion protocol)
   if (!NO_WORKTREE_ROLES.has(role)) {
     const worktreeSectionsPath = join(configDir, "prompts/worktree-sections.md");
     if (existsSync(worktreeSectionsPath)) {
-      prompt += "\n\n" + sub(readFileSync(worktreeSectionsPath, "utf8"));
+      prompt += `\n\n${sub(readFileSync(worktreeSectionsPath, "utf8"))}`;
     }
   }
 
   // Role prompt (from config/prompts/roles/)
   const rolePath = join(configDir, `prompts/roles/${role}.md`);
   if (existsSync(rolePath)) {
-    prompt += "\n\n" + sub(readFileSync(rolePath, "utf8"));
+    prompt += `\n\n${sub(readFileSync(rolePath, "utf8"))}`;
   }
 
   // Domain prompt (from config/prompts/domains/)
   if (domain) {
     const domainPath = join(configDir, `prompts/domains/${domain}.md`);
     if (existsSync(domainPath)) {
-      prompt += "\n\n" + sub(readFileSync(domainPath, "utf8"));
+      prompt += `\n\n${sub(readFileSync(domainPath, "utf8"))}`;
     }
   }
 
   // Team roster (so every agent knows who's on the team)
   if (team && team.length > 0) {
-    prompt += "\n\n" + buildTeamRoster(name, team);
+    prompt += `\n\n${buildTeamRoster(name, team)}`;
   }
 
   // Agent personality (individual character on top of role voice)
@@ -400,13 +400,13 @@ function composeSystemPrompt(
   // Mind prompt section
   const mindSectionPath = join(configDir, "prompts/mind-prompt-section.md");
   if (existsSync(mindSectionPath)) {
-    prompt += "\n\n" + readFileSync(mindSectionPath, "utf8").replaceAll("{NAME}", name);
+    prompt += `\n\n${readFileSync(mindSectionPath, "utf8").replaceAll("{NAME}", name)}`;
   }
 
   // Mind restoration block
   const mindLoad = run(["bun", "run", join(HIVE_DIR, "bin/hive-mind.ts"), "load", "--agent", name]);
   if (mindLoad.exitCode === 0 && mindLoad.stdout) {
-    prompt += "\n\n" + mindLoad.stdout;
+    prompt += `\n\n${mindLoad.stdout}`;
   }
 
   return prompt;
@@ -702,7 +702,7 @@ function doTeardown(clean: boolean): void {
       const data = JSON.parse(readFileSync(getAgentsJsonPath(), "utf8")) as AgentsJson;
       const now = new Date().toISOString();
       data.agents = data.agents.map((a) => ({ ...a, status: "stopped", lastActive: now }));
-      writeFileSync(getAgentsJsonPath(), JSON.stringify(data, null, 2) + "\n");
+      writeFileSync(getAgentsJsonPath(), `${JSON.stringify(data, null, 2)}\n`);
     } catch {
       /* ignore */
     }

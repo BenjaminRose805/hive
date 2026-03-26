@@ -1,5 +1,5 @@
-import { existsSync, readFileSync } from "fs";
-import { join } from "path";
+import { existsSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import type { AgentsJson } from "../shared/agent-types";
 import { getAgentsJsonPath, getSession, getStateDir } from "../shared/paths";
 import { run } from "../shared/subprocess";

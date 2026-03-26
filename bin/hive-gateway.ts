@@ -1,4 +1,5 @@
 #!/usr/bin/env bun
+
 /**
  * hive-gateway.ts
  *
@@ -13,6 +14,16 @@
  */
 
 import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { dirname, join } from "node:path";
+import {
   ChannelType,
   type ChatInputCommandInteraction,
   Client,
@@ -21,16 +32,6 @@ import {
   type Message,
   Partials,
 } from "discord.js";
-import {
-  chmodSync,
-  existsSync,
-  mkdirSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
-} from "fs";
-import { dirname, join } from "path";
 import { extractAgentsList, parseBody, parseHeader } from "../src/gateway/protocol-parser.ts";
 import { shouldDeliver, type WorkerInfo } from "../src/gateway/selective-router.ts";
 import { MessageType } from "../src/gateway/types.ts";
@@ -132,7 +133,7 @@ function getChannelIdForTask(taskId: string): string | undefined {
   return undefined;
 }
 
-function isChannelMember(channelId: string, workerId: string): boolean {
+function _isChannelMember(channelId: string, workerId: string): boolean {
   const convo = conversationChannels.get(channelId);
   if (!convo) return false;
   return convo.active.has(workerId) || convo.observing.has(workerId);
@@ -154,7 +155,7 @@ function persistConversationChannels(): void {
       };
     }
     const filePath = join(dir, "conversation-channels.json");
-    const tmpPath = filePath + ".tmp";
+    const tmpPath = `${filePath}.tmp`;
     writeFileSync(tmpPath, JSON.stringify(serialized, null, 2));
     renameSync(tmpPath, filePath);
   } catch {}
@@ -318,7 +319,7 @@ try {
 
 async function fetchTextChannel(id: string) {
   const ch = await client.channels.fetch(id);
-  if (!ch || !ch.isTextBased()) {
+  if (!ch?.isTextBased()) {
     throw new Error(`channel ${id} not found or not text-based`);
   }
   return ch;
@@ -513,7 +514,7 @@ async function routeInbound(msg: Message, excludeSender?: string): Promise<void>
 // ---------------------------------------------------------------------------
 
 // DEPRECATED — no longer used for injection, kept for potential logging
-function buildChannelXml(
+function _buildChannelXml(
   content: string,
   chatId: string,
   messageId: string,
@@ -888,11 +889,11 @@ async function handleSlashMemory(interaction: ChatInputCommandInteraction): Prom
     const combined = (output + errout).trim() || "(no memory output)";
     // Discord message limit is 2000 chars; truncate if needed
     const truncated =
-      combined.length > 1900 ? combined.slice(0, 1900) + "\n…(truncated)" : combined;
+      combined.length > 1900 ? `${combined.slice(0, 1900)}\n…(truncated)` : combined;
     await interaction.editReply({
       content: `**Memory for \`${agentName}\`:**\n\`\`\`\n${truncated}\n\`\`\``,
     });
-  } catch (err) {
+  } catch (_err) {
     await interaction.editReply({
       content: `Failed to read memory for \`${agentName}\`. Check gateway logs for details.`,
     });
@@ -1008,7 +1009,7 @@ async function handleSlashSpinUp(interaction: ChatInputCommandInteraction): Prom
     if (isNoWorktreeRole) {
       // Use the project repo from agents.json or fall back to HIVE_ROOT
       const agentsData2 = readAgentsJson();
-      const projectRepo =
+      const _projectRepo =
         agentsData2?.agents.find((a) => a.branch)?.branch?.replace(/^hive\//, "") ?? "";
       workDir = HIVE_ROOT;
     } else {
@@ -1017,7 +1018,7 @@ async function handleSlashSpinUp(interaction: ChatInputCommandInteraction): Prom
     }
 
     // Compose system prompt from worker-system-prompt.md + roles/domains + memory
-    const domainLabel = domain ? " specializing in " + domain : "";
+    const domainLabel = domain ? ` specializing in ${domain}` : "";
     const workerPromptPath = join(HIVE_ROOT, "config", "prompts", "worker-system-prompt.md");
     const sub = (text: string) =>
       text
@@ -1032,7 +1033,7 @@ async function handleSlashSpinUp(interaction: ChatInputCommandInteraction): Prom
     if (!isNoWorktreeRole) {
       const worktreeSectionsPath = join(HIVE_ROOT, "config", "prompts", "worktree-sections.md");
       if (existsSync(worktreeSectionsPath)) {
-        systemPrompt += "\n\n" + sub(readFileSync(worktreeSectionsPath, "utf8"));
+        systemPrompt += `\n\n${sub(readFileSync(worktreeSectionsPath, "utf8"))}`;
       }
     }
 
@@ -1040,22 +1041,22 @@ async function handleSlashSpinUp(interaction: ChatInputCommandInteraction): Prom
     const basePath = join(HIVE_ROOT, "config", "prompts", "profiles", "_base.md");
     const rolePath = join(HIVE_ROOT, "config", "prompts", "roles", `${role}.md`);
     if (existsSync(basePath)) {
-      systemPrompt += "\n\n" + sub(readFileSync(basePath, "utf8"));
+      systemPrompt += `\n\n${sub(readFileSync(basePath, "utf8"))}`;
     }
     if (existsSync(rolePath)) {
-      systemPrompt += "\n\n" + readFileSync(rolePath, "utf8");
+      systemPrompt += `\n\n${readFileSync(rolePath, "utf8")}`;
     }
     if (domain) {
       const domainPath = join(HIVE_ROOT, "config", "prompts", "domains", `${domain}.md`);
       if (existsSync(domainPath)) {
-        systemPrompt += "\n\n" + readFileSync(domainPath, "utf8");
+        systemPrompt += `\n\n${readFileSync(domainPath, "utf8")}`;
       }
     }
 
     // Append mind prompt section
     const mindPromptPath = join(HIVE_ROOT, "config", "prompts", "mind-prompt-section.md");
     if (existsSync(mindPromptPath)) {
-      systemPrompt += "\n\n" + readFileSync(mindPromptPath, "utf8").replace(/\{NAME\}/g, agentName);
+      systemPrompt += `\n\n${readFileSync(mindPromptPath, "utf8").replace(/\{NAME\}/g, agentName)}`;
     }
     // Append live mind state (context, inbox summary, watches)
     try {
@@ -1068,7 +1069,7 @@ async function handleSlashSpinUp(interaction: ChatInputCommandInteraction): Prom
         agentName,
       ]);
       if (mindLoad.exitCode === 0 && mindLoad.stdout.toString().trim()) {
-        systemPrompt += "\n\n" + mindLoad.stdout.toString();
+        systemPrompt += `\n\n${mindLoad.stdout.toString()}`;
       }
     } catch {
       /* mind not available yet, continue without */
@@ -1088,18 +1089,17 @@ async function handleSlashSpinUp(interaction: ChatInputCommandInteraction): Prom
     const scriptPath = join(stateDir, `.launch-gateway-${agentName}.sh`);
     const mcpConfigArg = existsSync(mcpConfigPath) ? `--mcp-config "${mcpConfigPath}"` : "";
     const settingsArg = existsSync(settingsPath) ? `--settings "${settingsPath}"` : "";
-    const scriptContent =
-      [
-        `#!/usr/bin/env bash`,
-        `export HIVE_WORKER_ID='${agentName}'`,
-        `export HIVE_ROOT='${workDir}'`,
-        `cd '${workDir}'`,
-        `claude --name "hive-${agentName}" \\`,
-        `  --append-system-prompt "$(cat '${promptFile}')" \\`,
-        ...(mcpConfigArg ? [`  ${mcpConfigArg} \\`] : []),
-        ...(settingsArg ? [`  ${settingsArg} \\`] : []),
-        `  --permission-mode bypassPermissions`,
-      ].join("\n") + "\n";
+    const scriptContent = `${[
+      `#!/usr/bin/env bash`,
+      `export HIVE_WORKER_ID='${agentName}'`,
+      `export HIVE_ROOT='${workDir}'`,
+      `cd '${workDir}'`,
+      `claude --name "hive-${agentName}" \\`,
+      `  --append-system-prompt "$(cat '${promptFile}')" \\`,
+      ...(mcpConfigArg ? [`  ${mcpConfigArg} \\`] : []),
+      ...(settingsArg ? [`  ${settingsArg} \\`] : []),
+      `  --permission-mode bypassPermissions`,
+    ].join("\n")}\n`;
     writeFileSync(scriptPath, scriptContent);
     chmodSync(scriptPath, 0o700);
 
@@ -1226,7 +1226,7 @@ async function handleSlashSpinUp(interaction: ChatInputCommandInteraction): Prom
       .setTimestamp();
 
     await interaction.editReply({ embeds: [embed] });
-  } catch (err) {
+  } catch (_err) {
     await interaction.editReply({
       content: `Failed to spin up \`${agentName}\`. Check gateway logs for details.`,
     });
@@ -1281,7 +1281,7 @@ async function handleSlashTearDown(interaction: ChatInputCommandInteraction): Pr
     }
 
     await interaction.editReply({ content: `Agent \`${agentName}\` agent stopped.` });
-  } catch (err) {
+  } catch (_err) {
     await interaction.editReply({
       content: `Failed to tear down \`${agentName}\`. Check gateway logs for details.`,
     });
@@ -1492,7 +1492,7 @@ async function handleSend(req: Request): Promise<Response> {
         .split(",")
         .map((f: string) => {
           const trimmed = f.trim();
-          return trimmed.endsWith("/") ? trimmed + "**" : trimmed;
+          return trimmed.endsWith("/") ? `${trimmed}**` : trimmed;
         })
         .filter(Boolean);
       writeScopeFile(parsed.target, parsed.taskId, allowed);

@@ -22,15 +22,15 @@ export function getGatewayDir(): string {
 }
 
 export function getStateDir(): string {
-  return process.env.HIVE_STATE_DIR ?? join(HIVE_DIR, 'state')
+  return process.env.HIVE_STATE_DIR ?? join(HIVE_DIR, "state");
 }
 
 export function getAgentsJsonPath(): string {
-  return join(getStateDir(), 'agents.json')
+  return join(getStateDir(), "agents.json");
 }
 
 export function getPidsJsonPath(): string {
-  return join(getStateDir(), 'pids.json')
+  return join(getStateDir(), "pids.json");
 }
 
 // Static — these don't change per-project
