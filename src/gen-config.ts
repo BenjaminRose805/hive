@@ -127,8 +127,12 @@ OPTIONS
   --bot-id <string>         Bot user ID (optional — auto-discovered at runtime)
   --project-repo <path>     Git repo path to create worktrees from (optional)
   --branch-prefix <string>  Branch name prefix for worktrees.
-                            Default: "hive/" when --agents is used,
-                                     "hive/worker-" when --workers N is used.
+                            Default (with HIVE_PROJECT set):
+                                     "hive/{project}/" for named agents,
+                                     "hive/{project}/worker-" for numeric.
+                            Default (without HIVE_PROJECT):
+                                     "hive/" for named agents,
+                                     "hive/worker-" for numeric.
   --budget <number>         USD budget per worker (default: 5)
   --help                    Show this help message
 
@@ -318,15 +322,22 @@ export function resolveAgents(args: Args): { names: string[]; branchPrefix: stri
     }
   }
 
-  // Determine branch prefix
+  // Determine branch prefix — namespace by project to prevent collisions
+  const project = process.env.HIVE_PROJECT;
   let branchPrefix: string;
   if (args.branchPrefixExplicit) {
     branchPrefix = args.branchPrefix;
+  } else if (project && args.agentNames !== null) {
+    // Named mode with project: "hive/dev/" → produces "hive/dev/alice"
+    branchPrefix = `hive/${project}/`;
+  } else if (project) {
+    // Numeric mode with project: "hive/dev/worker-" → produces "hive/dev/worker-01"
+    branchPrefix = `hive/${project}/worker-`;
   } else if (args.agentNames !== null) {
-    // Named mode default: "hive/" → produces "hive/alice"
+    // Named mode default (no project): "hive/" → produces "hive/alice"
     branchPrefix = "hive/";
   } else {
-    // Numeric mode default: "hive/worker-" → produces "hive/worker-01"
+    // Numeric mode default (no project): "hive/worker-" → produces "hive/worker-01"
     branchPrefix = "hive/worker-";
   }
 

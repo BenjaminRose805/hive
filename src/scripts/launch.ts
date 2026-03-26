@@ -744,7 +744,11 @@ async function launchHive(args: LaunchArgs): Promise<void> {
     )
   }
 
-  const branchPrefix = args.agents.some(n => !n.startsWith('worker-')) ? 'hive/' : 'hive/worker-'
+  // Namespace branches by project to prevent collisions between Hive instances
+  const project = process.env.HIVE_PROJECT
+  const branchPrefix = project
+    ? (args.agents.some(n => !n.startsWith('worker-')) ? `hive/${project}/` : `hive/${project}/worker-`)
+    : (args.agents.some(n => !n.startsWith('worker-')) ? 'hive/' : 'hive/worker-')
 
   // Generate configs
   generateConfigs(args.agents, args.roles, args)
@@ -850,6 +854,7 @@ export async function projectUp(args: string[]): Promise<void> {
 
   // Set per-project isolation env vars (read by paths.ts getters)
   process.env.HIVE_SESSION = `hive-${projectName}`
+  process.env.HIVE_PROJECT = projectName
   process.env.HIVE_GATEWAY_SOCKET = `/tmp/hive-gateway-${projectName}/gateway.sock`
   process.env.HIVE_STATE_DIR = join(HIVE_DIR, 'state', projectName)
 
