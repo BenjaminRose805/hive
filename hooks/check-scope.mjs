@@ -1,12 +1,17 @@
 #!/usr/bin/env node
 /**
  * check-scope.mjs — Claude Code PreToolUse hook for file scope enforcement.
- * Reads scope from .hive/scope/{HIVE_WORKER_ID}.json
- * Blocks Write/Edit/NotebookEdit/Bash-writes to out-of-scope files via stdout JSON.
+ *
+ * Two modes:
+ *   1. Module map mode (.hive/modules.json exists): notify owner on cross-module edits, never block.
+ *   2. Legacy scope mode (.hive/scope/{agent}.json): block out-of-scope writes (backward compatible).
+ *
+ * In module map mode, cross-module edits write a scope-notify delta to .hive/mind/pending/
+ * for the Mind daemon to process. The daemon notifies the module owner at info priority.
  */
 
-import { readFileSync } from 'fs'
-import { resolve, relative, isAbsolute } from 'path'
+import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'fs'
+import { resolve, relative, isAbsolute, join } from 'path'
 import { stdin } from 'process'
 
 // --- Helpers ---
@@ -26,6 +31,17 @@ function deny(reason) {
   process.exit(0)
 }
 
+// NOTE: Brace expansion ({a,b}) is not supported
+function globToRegex(pattern) {
+  let regex = pattern
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')  // Escape regex metacharacters (except * and ?)
+    .replace(/\*\*/g, '{{GLOBSTAR}}')        // Placeholder for **
+    .replace(/\*/g, '[^/]*')                  // * matches anything except /
+    .replace(/\?/g, '[^/]')                   // ? matches single char except /
+    .replace(/\{\{GLOBSTAR\}\}/g, '.*')       // ** matches everything including /
+  return new RegExp(`^${regex}$`)
+}
+
 // --- Config ---
 const AGENT_NAME = process.env.HIVE_WORKER_ID || ''
 const HIVE_ROOT = process.env.HIVE_ROOT || ''
@@ -33,22 +49,6 @@ const HIVE_ROOT = process.env.HIVE_ROOT || ''
 // No agent or hive root = no enforcement
 if (!AGENT_NAME || !HIVE_ROOT) {
   allow()
-}
-
-const SCOPE_FILE = resolve(HIVE_ROOT, '.hive', 'scope', `${AGENT_NAME}.json`)
-
-// --- Load scope (fail-closed: deny on corrupt/missing file) ---
-// Single try/catch eliminates TOCTOU race between existsSync and readFileSync
-let scope
-try {
-  scope = JSON.parse(readFileSync(SCOPE_FILE, 'utf-8'))
-} catch (err) {
-  // ENOENT = no scope file = task not yet assigned — no enforcement
-  if (err.code === 'ENOENT') {
-    allow()
-  }
-  // Corrupt or unreadable scope file — fail closed
-  deny(`SCOPE ERROR: Could not read scope file for agent "${AGENT_NAME}". Denying write for safety. Error: ${err.message}`)
 }
 
 // --- Read stdin ---
@@ -66,95 +66,148 @@ if (toolName === 'Write' || toolName === 'Edit' || toolName === 'NotebookEdit') 
   filePath = toolInput.file_path || ''
 } else if (toolName === 'Bash') {
   const cmd = toolInput.command || ''
-  // Detect write patterns — covers redirects, in-place edits, file manipulation,
-  // and common tools that write to the filesystem
   const writePatterns = [
-    />{1,2}\s*(\S+)/,                          // shell redirects: > file, >> file
-    /sed\s+-i\s+.*?\s+(\S+)/,                  // sed -i
-    /(?:mv|cp)\s+\S+\s+(\S+)/,                 // mv/cp target
-    /tee\s+(?:-a\s+)?(\S+)/,                   // tee file, tee -a file
-    /dd\s+.*?of=(\S+)/,                         // dd of=target
-    /(?:curl|wget)\s+.*?-o\s+(\S+)/,           // curl -o / wget -o
-    /(?:curl|wget)\s+.*?--output\s+(\S+)/,     // curl/wget --output
-    /install\s+(?:-\S+\s+)*\S+\s+(\S+)/,        // install [flags] source dest
-    /rsync\s+(?:-\S+\s+)*\S+\s+(\S+)/,          // rsync [flags] source dest
-    /patch\s+(?:-\S+\s+)*(\S+)/,                 // patch [flags] file
-    /truncate\s+(?:-\S+\s+\S+\s+)*(?:-\S+\s+)*(\S+)/, // truncate [flags] file
-    /python[23]?\s+-c\s+.*?open\s*\(/,         // python -c with file open (no path extraction — block)
-    /node\s+-e\s+.*?writeFile/,                 // node -e with writeFile (no path extraction — block)
-    /git\s+checkout\s+.*?--\s+(\S+)/,          // git checkout -- file (overwrites)
+    />{1,2}\s*(\S+)/,
+    /sed\s+-i\s+.*?\s+(\S+)/,
+    /(?:mv|cp)\s+\S+\s+(\S+)/,
+    /tee\s+(?:-a\s+)?(\S+)/,
+    /dd\s+.*?of=(\S+)/,
+    /(?:curl|wget)\s+.*?-o\s+(\S+)/,
+    /(?:curl|wget)\s+.*?--output\s+(\S+)/,
+    /install\s+(?:-\S+\s+)*\S+\s+(\S+)/,
+    /rsync\s+(?:-\S+\s+)*\S+\s+(\S+)/,
+    /patch\s+(?:-\S+\s+)*(\S+)/,
+    /truncate\s+(?:-\S+\s+\S+\s+)*(?:-\S+\s+)*(\S+)/,
+    /python[23]?\s+-c\s+.*?open\s*\(/,
+    /node\s+-e\s+.*?writeFile/,
+    /git\s+checkout\s+.*?--\s+(\S+)/,
   ]
 
   for (const pattern of writePatterns) {
     const match = cmd.match(pattern)
     if (match) {
-      // Some patterns (python -c, node -e) detect writes but can't extract a path —
-      // for those, block with a generic message
       filePath = match[1] || ''
-      if (!filePath) {
-        deny(`SCOPE VIOLATION: Bash command appears to write files via scripting. Use Write/Edit tools instead for scope-checked file operations.`)
-      }
+      if (!filePath) { break }
       break
     }
   }
 
-  if (!filePath) {
-    // No write detected in bash command — allow
-    allow()
-  }
+  if (!filePath) { allow() }
 } else {
-  // Read-only tools — always allow
   allow()
 }
 
-if (!filePath) {
-  allow()
-}
+if (!filePath) { allow() }
 
 // --- Normalize path to prevent traversal attacks ---
-// Fix #5: use process.cwd() only, not process.env.cwd
 const cwd = process.cwd()
 const absPath = isAbsolute(filePath) ? resolve(filePath) : resolve(cwd, filePath)
 const relPath = relative(cwd, absPath)
 
-// Reject paths that escape the worktree root via ../
-if (relPath.startsWith('..')) {
+// Reject paths that escape both the worktree AND the hive root
+const relFromHiveRoot = relative(HIVE_ROOT, absPath)
+if (relPath.startsWith('..') && relFromHiveRoot.startsWith('..')) {
   deny(`SCOPE VIOLATION: Path "${filePath}" resolves outside the worktree. Traversal blocked.`)
 }
 
-// --- Glob matching ---
-const patterns = [...(scope.allowed || []), ...(scope.shared || [])]
+// Use HIVE_ROOT-relative path for matching when file is within the hive root
+const matchPath = relFromHiveRoot.startsWith('..') ? relPath : relFromHiveRoot
 
-// NOTE: Brace expansion ({a,b}) is not supported
-function globToRegex(pattern) {
-  let regex = pattern
-    .replace(/[.+^${}()|[\]\\]/g, '\\$&')  // Escape regex metacharacters (except * and ?)
-    .replace(/\*\*/g, '{{GLOBSTAR}}')        // Placeholder for **
-    .replace(/\*/g, '[^/]*')                  // * matches anything except /
-    .replace(/\?/g, '[^/]')                   // ? matches single char except /
-    .replace(/\{\{GLOBSTAR\}\}/g, '.*')       // ** matches everything including /
-  return new RegExp(`^${regex}$`)
+// --- Try module map mode first ---
+const MODULE_MAP_PATH = resolve(HIVE_ROOT, '.hive', 'modules.json')
+
+let moduleMap = null
+try {
+  moduleMap = JSON.parse(readFileSync(MODULE_MAP_PATH, 'utf-8'))
+} catch {
+  // No module map — fall through to legacy scope mode
 }
 
-// Match the normalized relative path against scope patterns
-for (const pattern of patterns) {
-  if (globToRegex(pattern).test(relPath)) {
+if (moduleMap) {
+  const result = resolveFileOwnership(matchPath, moduleMap)
+
+  if (result.kind === 'shared') { allow() }
+  if (result.kind === 'owned' && result.owner === AGENT_NAME) { allow() }
+  if (result.kind === 'owned') {
+    writeScopeNotifyDelta(AGENT_NAME, matchPath, toolName, result.owner, result.module)
     allow()
   }
+  if (result.kind === 'unassigned') {
+    writeScopeNotifyDelta(AGENT_NAME, matchPath, toolName, result.fallback_owner, '_unassigned')
+    allow()
+  }
+  allow()
 }
 
-// --- BLOCKED — out of scope ---
+// --- Legacy scope mode: block out-of-scope writes ---
+const SCOPE_FILE = resolve(HIVE_ROOT, '.hive', 'scope', `${AGENT_NAME}.json`)
+
+let scope
+try {
+  scope = JSON.parse(readFileSync(SCOPE_FILE, 'utf-8'))
+} catch (err) {
+  if (err.code === 'ENOENT') { allow() }
+  deny(`SCOPE ERROR: Could not read scope file for agent "${AGENT_NAME}". Denying write for safety. Error: ${err.message}`)
+}
+
+// Strip backticks and trailing annotations from scope patterns
+const patterns = [...(scope.allowed || []), ...(scope.shared || [])].map(p => p.replace(/^`|`.*$/g, '').trim()).filter(Boolean)
+
+for (const pattern of patterns) {
+  if (globToRegex(pattern).test(matchPath)) { allow() }
+}
+
 const allowedList = (scope.allowed || []).map(p => `  - ${p}`).join('\n')
 const reason = [
-  `SCOPE VIOLATION: ${relPath} is outside your assigned scope.`,
-  ``,
+  `SCOPE VIOLATION: ${matchPath} is outside your assigned scope.`,
+  '',
   `Your scope for task "${scope.taskId}":`,
   allowedList,
-  ``,
-  `Instead, publish a contract request:`,
+  '',
+  'Instead, publish a contract request:',
   `  bun run bin/hive-mind.ts publish --type contract --topic <what-you-need> --agent ${AGENT_NAME} --data '{"request": "describe what you need"}'`,
-  ``,
-  `The owning agent will receive a CONTRACT_UPDATE notification automatically.`,
+  '',
+  'The owning agent will receive a CONTRACT_UPDATE notification automatically.',
 ].join('\n')
 
 deny(reason)
+
+// --- Module map helpers ---
+
+function resolveFileOwnership(filePath, config) {
+  for (const pattern of (config.shared || [])) {
+    if (globToRegex(pattern).test(filePath)) {
+      return { kind: 'shared', pattern }
+    }
+  }
+  for (const [moduleName, moduleDef] of Object.entries(config.modules || {})) {
+    for (const pattern of (moduleDef.files || [])) {
+      if (globToRegex(pattern).test(filePath)) {
+        return { kind: 'owned', module: moduleName, owner: moduleDef.owner, pattern }
+      }
+    }
+  }
+  return { kind: 'unassigned', fallback_owner: config.unassigned_owner || 'monarch' }
+}
+
+function writeScopeNotifyDelta(editor, file, tool, owner, moduleName) {
+  const pendingDir = resolve(HIVE_ROOT, '.hive', 'mind', 'pending')
+  try { mkdirSync(pendingDir, { recursive: true }) } catch {}
+
+  const delta = {
+    agent: editor,
+    action: 'scope-notify',
+    target_type: 'module',
+    target_topic: moduleName,
+    content: { file, tool, owner, module: moduleName },
+  }
+
+  const filename = `${Date.now()}-${editor}-scope-notify.json`
+  const tmpPath = join(pendingDir, `.tmp-${filename}`)
+  const finalPath = join(pendingDir, filename)
+
+  try {
+    writeFileSync(tmpPath, JSON.stringify(delta, null, 2))
+    renameSync(tmpPath, finalPath)
+  } catch {}
+}
