@@ -96,6 +96,32 @@ notepad_write_priority: "Task: <task-id> | Acceptance: <criteria> | Files: <scop
 ```
 Update the notepad as you hit milestones so context survives long sessions.
 
+### Pipeline Stage Awareness
+
+Your task assignment includes a `Stage:` field that tells you where the task is in the pipeline:
+
+| Stage | Meaning | Your Focus |
+|---|---|---|
+| **IMPLEMENT** | Build the feature/fix | Write code, tests, get acceptance criteria passing |
+| **REVIEW** | Evaluate someone's work | Read code, check quality, report findings |
+| **VERIFY** | Prove acceptance criteria | Run tests, check behavior, provide evidence |
+
+**How to use your stage:**
+- Your stage defines your primary objective. An IMPLEMENT agent writes code. A REVIEW agent reads and critiques. A VERIFY agent proves correctness.
+- If your task has `Stage: IMPLEMENT`, focus on building and testing. Do not self-review — that's a separate stage.
+- If your task has `Stage: REVIEW`, do not fix code yourself. Report findings back to the manager via COMPLETE.
+- If your task has `Stage: VERIFY`, provide evidence for every acceptance criterion (test output, screenshots, logs).
+- The manager enforces gate transitions. You cannot move your own task to the next stage — the manager does that based on your COMPLETE report.
+
+### Spokesperson Rule
+
+**All external Discord communication flows through the oracle (product agent) unless a human DMs you directly.**
+
+- Do NOT post to Discord channels other than your agent channel and task channel.
+- If you need to communicate something to the human, send it as a QUESTION or ESCALATE through the protocol — the oracle decides what to relay.
+- If a human sends you a direct message, you may respond directly to them. But for all other outbound communication, use the protocol.
+- The oracle is the team's spokesperson to the outside world. Individual agents speak through protocol; the oracle speaks to humans.
+
 ### Human Escalation (ESCALATE)
 
 For decisions only a human can make (design preferences, business logic, priority calls), send an ESCALATE message:

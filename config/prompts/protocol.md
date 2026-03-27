@@ -45,6 +45,8 @@ Description: Implement JWT authentication middleware
 Acceptance: - POST /login returns JWT; - Protected routes return 401 without token
 Dependencies: none
 Budget: $5.00
+Stage: IMPLEMENT
+Mode: required /ralph
 ```
 
 Fields:
@@ -54,6 +56,8 @@ Fields:
 - `Acceptance` — list of criteria that define done; each criterion starts with `-`
 - `Dependencies` — other task IDs that must complete first, or `none`
 - `Budget` — maximum cost budget for this task (agent monitors and self-limits)
+- `Stage` — pipeline stage: `IMPLEMENT`, `REVIEW`, or `VERIFY` (see Pipeline Stages below)
+- `Mode` — execution mode hint: `required <mode>` (agent must use it), `suggested <mode>` (agent may use it), or omitted (agent chooses)
 
 ---
 
@@ -207,6 +211,78 @@ Fields:
 - `Default` — the action that will be taken if no human response is received within the stated timeout
 
 Agents must always include a `Default` so work is never blocked indefinitely.
+
+---
+
+## Pipeline Stages
+
+Tasks flow through three pipeline stages. The manager enforces gate transitions between stages.
+
+```
+IMPLEMENT → REVIEW → VERIFY → DONE
+    ↑          |        |
+    └──────────┘        |
+    └───────────────────┘
+    (gate failure loops back)
+```
+
+### Stage Definitions
+
+| Stage | Purpose | Assigned To | Gate to Next |
+|---|---|---|---|
+| **IMPLEMENT** | Build the feature or fix | Engineer agents | COMPLETE with passing tests |
+| **REVIEW** | Evaluate code quality, correctness, security | Engineer agents (cross-review) | Approval with no blocking findings |
+| **VERIFY** | Prove all acceptance criteria with evidence | Engineer agents (independent verification) | All criteria verified with evidence |
+
+### Stage Field in TASK_ASSIGN
+
+Every TASK_ASSIGN includes a `Stage:` field. The agent uses this to understand their role:
+- `Stage: IMPLEMENT` — write code, write tests, make acceptance criteria pass
+- `Stage: REVIEW` — read and critique code, report findings (do not fix code yourself)
+- `Stage: VERIFY` — run tests, check behavior, provide evidence for every criterion
+
+### Mode Field in TASK_ASSIGN
+
+The optional `Mode:` field hints at which OMC execution mode the agent should use:
+- `Mode: required /ralph` — agent **must** use `/ralph` (self-referential loop until complete)
+- `Mode: required /ultrawork` — agent **must** use `/ultrawork` (parallel fan-out)
+- `Mode: suggested /ralph` — agent **may** use `/ralph` but can choose differently
+- Omitted — agent chooses the best execution mode for the task
+
+### Gate Failure
+
+When a gate fails (review finds blocking issues, verification fails), the manager sends an ANSWER to the responsible agent with:
+- Specific, actionable feedback
+- The stage to return to (e.g., `Stage: IMPLEMENT` for a fix cycle)
+- Updated acceptance criteria if the scope changed
+
+The agent re-enters the specified stage and works toward a new COMPLETE.
+
+---
+
+## Spokesperson Routing
+
+The **oracle** (product agent) is the team's single external voice. All human-facing communication flows through the oracle.
+
+### How It Works
+
+- Human messages are routed to the oracle first (Pass 0 in the gateway).
+- The oracle gathers requirements, clarifies intent, and produces specs for the manager.
+- The manager decomposes specs into TASK_ASSIGNs — the manager never talks to humans directly.
+- Agents communicate through protocol messages (QUESTION, ESCALATE, COMPLETE) — never directly to humans in Discord.
+- The oracle decides what to relay to the human and how.
+
+### Rules
+
+- **Exception**: if a human sends a direct message (DM or @mention) to a specific agent, that agent may respond directly.
+- Agents must not post in Discord channels they were not assigned to.
+- Agent-to-agent communication uses `hive__send` (direct inbox messages) — this is internal and does not violate the spokesperson rule.
+
+### Why
+
+- Prevents conflicting or redundant messages reaching the human.
+- Keeps external communication coherent — one voice, one status, one thread.
+- Separates product concerns (oracle) from coordination concerns (manager).
 
 ---
 
