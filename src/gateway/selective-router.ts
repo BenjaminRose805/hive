@@ -95,3 +95,20 @@ export function isSpokesperson(worker: WorkerInfo): boolean {
 export function findSpokesperson(workers: WorkerInfo[]): WorkerInfo | undefined {
   return workers.find((w) => w.role === "product");
 }
+
+export function shouldDeliverHumanMessage(
+  worker: WorkerInfo,
+  isChannelOwner: boolean,
+  isConversationMember: boolean,
+): RoutingDecision {
+  if (isSpokesperson(worker)) {
+    return { deliver: true, reason: "spokesperson receives all human messages" };
+  }
+  if (isChannelOwner) {
+    return { deliver: true, reason: "human DM to agent channel" };
+  }
+  if (isConversationMember) {
+    return { deliver: true, reason: "human message in conversation channel" };
+  }
+  return { deliver: false, reason: "human messages route through spokesperson" };
+}

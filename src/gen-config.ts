@@ -897,11 +897,22 @@ function generateSingleBot(args: Args): void {
       // Add scope enforcement hook to PreToolUse
       if (!mergedHooks.PreToolUse) mergedHooks.PreToolUse = [];
       mergedHooks.PreToolUse.push({
-        matcher: "Write|Edit|Bash|NotebookEdit",
+        matcher: "Write|Edit|NotebookEdit|Bash",
         hooks: [
           {
             type: "command",
             command: `node "${join(HIVE_ROOT, "hooks", "check-scope.mjs")}"`,
+          },
+        ],
+      });
+
+      // Block AskUserQuestion — agents must use Discord instead
+      mergedHooks.PreToolUse.push({
+        matcher: "AskUserQuestion",
+        hooks: [
+          {
+            type: "command",
+            command: `node "${join(HIVE_ROOT, "hooks", "intercept-ask-user.mjs")}"`,
           },
         ],
       });

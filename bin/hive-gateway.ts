@@ -33,7 +33,7 @@ import {
   Partials,
 } from "discord.js";
 import { extractAgentsList, parseBody, parseHeader } from "../src/gateway/protocol-parser.ts";
-import { shouldDeliver, findSpokesperson, type WorkerInfo } from "../src/gateway/selective-router.ts";
+import { shouldDeliver, shouldDeliverHumanMessage, findSpokesperson, type WorkerInfo } from "../src/gateway/selective-router.ts";
 import { MessageType } from "../src/gateway/types.ts";
 import type { DeltaFile } from "../src/mind/mind-types.ts";
 import { type AgentsJson, NO_WORKTREE_ROLES } from "../src/shared/agent-types.ts";
@@ -435,10 +435,8 @@ async function routeInbound(msg: Message, excludeSender?: string): Promise<void>
 
     const mentioned = await isMentioned(msg, worker.mentionPatterns, effectiveChannelId);
     if (mentioned) {
-      // Human messages only reach non-spokesperson agents via their own channel (Pass 1)
-      // or conversation/task channels (Pass 3) — not via cross-channel @mentions
-      const isTaskOrConvoChannel = conversationChannels.has(effectiveChannelId);
-      if (isHumanMsg && worker.role !== "product" && !isTaskOrConvoChannel) {
+      // Human messages only reach non-spokesperson agents via their own channel or conversation channels
+      if (isHumanMsg && worker.role !== "product" && worker.role !== "manager") {
         continue;
       }
       const workerInfo: WorkerInfo = { workerId: worker.workerId, channelId: worker.channelId };
