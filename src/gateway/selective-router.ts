@@ -87,3 +87,11 @@ export function shouldDeliver(
       return { deliver: true, reason: `unknown message type: ${parsed.type}` };
   }
 }
+
+export function isSpokesperson(worker: WorkerInfo): boolean {
+  return worker.role === "product";
+}
+
+export function findSpokesperson(workers: WorkerInfo[]): WorkerInfo | undefined {
+  return workers.find((w) => w.role === "product");
+}
