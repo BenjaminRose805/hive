@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { CORE_DOMAINS, VALID_ROLES } from "./agent-types.ts";
+import { CORE_DOMAINS, NO_WORKTREE_ROLES, VALID_ROLES } from "./agent-types.ts";
 import {
   AGENT_NAME_RE,
   parseAgentAssignment,
@@ -61,6 +61,12 @@ describe("validateRole", () => {
     for (const role of VALID_ROLES) {
       expect(() => validateRole(role)).not.toThrow();
     }
+  });
+
+  test("includes product role", () => {
+    expect(VALID_ROLES.has("product")).toBe(true);
+    expect(() => validateRole("product")).not.toThrow();
+    expect(NO_WORKTREE_ROLES.has("product")).toBe(true);
   });
 
   test("rejects invalid roles", () => {

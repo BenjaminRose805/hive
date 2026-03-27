@@ -1,0 +1,103 @@
+{
+  "version": 1,
+  "unassigned_owner": "monarch",
+  "shared": [
+    "package.json",
+    "tsconfig.json",
+    "bun.lock",
+    ".hive/**",
+    ".omc/**",
+    "node_modules/**",
+    "*.md"
+  ],
+  "modules": {
+    "gateway-routing": {
+      "owner": "gatekeeper",
+      "files": [
+        "src/gateway/**"
+      ],
+      "description": "Gateway message routing, protocol parsing, selective router"
+    },
+    "mind-daemon": {
+      "owner": "synaptic",
+      "files": [
+        "src/mind/**"
+      ],
+      "description": "Hive Mind daemon, delta processing, reader/watch management"
+    },
+    "agent-lifecycle": {
+      "owner": "helmsman",
+      "files": [
+        "src/scripts/**"
+      ],
+      "description": "Agent launch, status, integration scripts"
+    },
+    "config-gen": {
+      "owner": "cartographer",
+      "files": [
+        "src/gen-config.ts"
+      ],
+      "description": "Per-agent config generation (mcp, access, settings, worktrees)"
+    },
+    "shared-utils": {
+      "owner": "monarch",
+      "files": [
+        "src/shared/**"
+      ],
+      "description": "Shared types, validation, paths, subprocess utilities"
+    },
+    "mcp-relays": {
+      "owner": "gatekeeper",
+      "files": [
+        "src/mcp/**"
+      ],
+      "description": "Discord and inbox MCP relay servers"
+    },
+    "cli": {
+      "owner": "cartographer",
+      "files": [
+        "bin/**"
+      ],
+      "description": "CLI entry points (hive, hive-gateway, hive-mind)"
+    },
+    "hooks": {
+      "owner": "helmsman",
+      "files": [
+        "hooks/**"
+      ],
+      "description": "Claude Code hooks (scope enforcement, ask-user intercept)"
+    },
+    "prompts": {
+      "owner": "monarch",
+      "files": [
+        "config/prompts/**"
+      ],
+      "description": "System prompts, protocol definitions, role profiles"
+    },
+    "tool-config": {
+      "owner": "cartographer",
+      "files": [
+        "config/tools/**",
+        "config/tool-profiles/**"
+      ],
+      "description": "MCP tool definitions and role-to-tool mappings"
+    },
+    "frontend": {
+      "owner": "weaver",
+      "files": [
+        "src/frontend/**",
+        "public/**"
+      ],
+      "description": "Frontend dashboard (if/when created)"
+    },
+    "cicd": {
+      "owner": "pipeline",
+      "files": [
+        ".github/**",
+        "Dockerfile",
+        "docker-compose*.yml"
+      ],
+      "description": "CI/CD pipelines and container configuration"
+    }
+  }
+}

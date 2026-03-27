@@ -338,6 +338,9 @@ function buildTeamRoster(self: string, members: TeamMember[]): string {
       case "writer":
         lines.push(`- **Documentation, guides, API docs** → ${names}`);
         break;
+      case "product":
+        lines.push(`- **Product decisions, user-facing communication, human interface** → ${names}`);
+        break;
     }
   }
   return lines.join("\n");
@@ -842,14 +845,17 @@ function generateConfigs(names: string[], roles: Map<string, string>, args: Laun
     const role = roles.get(name) ?? "engineer";
     const domain = args.domains.get(name);
     const isManager = role === "manager";
+    const isOracle = role === "product";
+    const isSpokesperson = isManager || isOracle;
     return {
       workerId: name,
       socketPath: `${getGatewayDir()}/${name}.sock`,
       channelId: "",
-      mentionPatterns: isManager ? [name, "hive"] : [name, "all-workers"],
-      requireMention: !isManager,
+      mentionPatterns: isSpokesperson ? [name, "hive"] : [name, "all-workers"],
+      requireMention: !isSpokesperson,
       role,
       ...(domain ? { domain } : {}),
+      ...(isSpokesperson ? { isSpokesperson: true } : {}),
     };
   });
 
@@ -875,6 +881,8 @@ function generateConfigs(names: string[], roles: Map<string, string>, args: Laun
     ensureDir(workerDir);
     const role = roles.get(name) ?? "engineer";
     const isManager = role === "manager";
+    const isOracle = role === "product";
+    const isSpokesperson = isManager || isOracle;
     const roleTools = resolveToolsForRole(
       role,
       name,
@@ -891,8 +899,8 @@ function generateConfigs(names: string[], roles: Map<string, string>, args: Laun
         name,
         `${getGatewayDir()}/${name}.sock`,
         args.channelId,
-        isManager ? `${name},hive` : `${name},all-workers`,
-        !isManager,
+        isSpokesperson ? `${name},hive` : `${name},all-workers`,
+        !isSpokesperson,
         roleTools,
         getGatewaySocket(),
         globalSettings.mcpServers,
@@ -1028,6 +1036,8 @@ async function launchHive(args: LaunchArgs): Promise<void> {
       const workerDir = join(getStateDir(), "workers", name);
       const role = args.roles.get(name) ?? "engineer";
       const isManager = role === "manager";
+      const isOracle = role === "product";
+      const isSpokesperson = isManager || isOracle;
       const roleTools = resolveToolsForRole(
         role,
         name,
@@ -1043,8 +1053,8 @@ async function launchHive(args: LaunchArgs): Promise<void> {
           name,
           `${getGatewayDir()}/${name}.sock`,
           channelId,
-          isManager ? `${name},hive` : `${name},all-workers`,
-          !isManager,
+          isSpokesperson ? `${name},hive` : `${name},all-workers`,
+          !isSpokesperson,
           roleTools,
           getGatewaySocket(),
           loadGlobalSettings().mcpServers,
@@ -1154,11 +1164,12 @@ export async function projectDown(args: string[]): Promise<void> {
 
 /** Teardown --clean, remove state, call projectUp */
 export async function projectFresh(args: string[]): Promise<void> {
-  const projectName = args.find(a => !a.startsWith('-'));
+  // Set env vars BEFORE teardown so it targets the correct project state
+  const projectName = args.find((a) => !a.startsWith("-"));
   if (projectName) {
     process.env.HIVE_SESSION = `hive-${projectName}`;
     process.env.HIVE_GATEWAY_SOCKET = `/tmp/hive-gateway-${projectName}/gateway.sock`;
-    process.env.HIVE_STATE_DIR = join(HIVE_DIR, 'state', projectName);
+    process.env.HIVE_STATE_DIR = join(HIVE_DIR, "state", projectName);
   }
 
   doTeardown(true);

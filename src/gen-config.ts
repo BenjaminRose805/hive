@@ -10,7 +10,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { type AgentEntry, type AgentsJson, NO_WORKTREE_ROLES } from "./shared/agent-types.ts";
-import { parseAgentAssignment, validateDomain, validateRole } from "./shared/validation.ts";
+import { AGENT_NAME_RE, parseAgentAssignment, RESERVED_NAMES, validateDomain, validateRole } from "./shared/validation.ts";
 
 // ---------------------------------------------------------------------------
 // Types
@@ -78,6 +78,7 @@ interface GatewayWorkerConfig {
   requireMention: boolean;
   role: string;
   domain?: string;
+  isSpokesperson?: boolean;
 }
 
 interface GatewayConfigJson {
@@ -97,9 +98,6 @@ interface GatewayConfigJson {
 const HIVE_ROOT = resolve(import.meta.dir, "..");
 const DISCORD_RELAY_PATH = join(HIVE_ROOT, "src/mcp/discord-relay.ts");
 const INBOX_RELAY_PATH = join(HIVE_ROOT, "src/mcp/inbox-relay.ts");
-
-const RESERVED_NAMES = new Set(["gateway", "all-workers", "all-agents", "hive"]);
-const AGENT_NAME_RE = /^[a-zA-Z0-9-]{1,32}$/;
 
 // ---------------------------------------------------------------------------
 // Help
@@ -789,14 +787,17 @@ function generateSingleBot(args: Args): void {
     const role = args.agentRoles.get(name) ?? "engineer";
     const domain = args.agentDomains.get(name);
     const isManager = role === "manager";
+    const isOracle = role === "product";
+    const isSpokesperson = isManager || isOracle;
     return {
       workerId: name,
       socketPath: `/tmp/hive-gateway/${name}.sock`,
       channelId: "",
-      mentionPatterns: isManager ? [name, "hive"] : [name, "all-workers"],
-      requireMention: !isManager,
+      mentionPatterns: isSpokesperson ? [name, "hive"] : [name, "all-workers"],
+      requireMention: !isSpokesperson,
       role,
       ...(domain ? { domain } : {}),
+      ...(isSpokesperson ? { isSpokesperson: true } : {}),
     };
   });
 
@@ -830,6 +831,8 @@ function generateSingleBot(args: Args): void {
 
     const agentRole = args.agentRoles.get(name) ?? "engineer";
     const isManager = agentRole === "manager";
+    const isOracle = agentRole === "product";
+    const isSpokesperson = isManager || isOracle;
     const roleTools = resolveToolsForRole(
       agentRole,
       name,
@@ -844,12 +847,12 @@ function generateSingleBot(args: Args): void {
       allowFrom: [],
       groups: {
         [args.channelId]: {
-          requireMention: !isManager,
+          requireMention: !isSpokesperson,
           allowFrom: [],
         },
       },
       pending: {},
-      mentionPatterns: isManager ? [name, "hive"] : [name, "all-workers"],
+      mentionPatterns: isSpokesperson ? [name, "hive"] : [name, "all-workers"],
     };
 
     const globalSettings = loadGlobalSettings();
@@ -862,8 +865,8 @@ function generateSingleBot(args: Args): void {
         name,
         `/tmp/hive-gateway/${name}.sock`,
         args.channelId,
-        isManager ? `${name},hive` : `${name},all-workers`,
-        !isManager,
+        isSpokesperson ? `${name},hive` : `${name},all-workers`,
+        !isSpokesperson,
         roleTools,
         undefined,
         globalSettings.mcpServers,
@@ -885,10 +888,16 @@ function generateSingleBot(args: Args): void {
         }
       }
 
+      // Warn about misconfigured launches — scope hook silently disables without both env vars
+      console.warn(
+        `  NOTE   Agent ${name}: scope enforcement requires HIVE_WORKER_ID and HIVE_ROOT env vars at launch. ` +
+          `If HIVE_ROOT is set but HIVE_WORKER_ID is missing, the scope hook will silently disable.`,
+      );
+
       // Add scope enforcement hook to PreToolUse
       if (!mergedHooks.PreToolUse) mergedHooks.PreToolUse = [];
       mergedHooks.PreToolUse.push({
-        matcher: "Write|Edit|Bash",
+        matcher: "Write|Edit|Bash|NotebookEdit",
         hooks: [
           {
             type: "command",

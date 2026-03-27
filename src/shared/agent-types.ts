@@ -1,4 +1,4 @@
-export type Role = "manager" | "architect" | "engineer" | "qa" | "devops" | "writer" | "reviewer";
+export type Role = "manager" | "architect" | "engineer" | "qa" | "devops" | "writer" | "reviewer" | "product";
 export type CoreDomain =
   | "api"
   | "auth"
@@ -19,6 +19,7 @@ export const VALID_ROLES: ReadonlySet<string> = new Set<Role>([
   "devops",
   "writer",
   "reviewer",
+  "product",
 ]);
 
 export const CORE_DOMAINS: ReadonlySet<string> = new Set<CoreDomain>([
@@ -35,7 +36,7 @@ export const CORE_DOMAINS: ReadonlySet<string> = new Set<CoreDomain>([
 ]);
 
 /** Roles that don't produce file changes — no worktree, no branch, no scope enforcement */
-export const NO_WORKTREE_ROLES: ReadonlySet<string> = new Set(["manager", "architect", "reviewer"]);
+export const NO_WORKTREE_ROLES: ReadonlySet<string> = new Set(["manager", "architect", "reviewer", "product"]);
 
 export interface AgentEntry {
   name: string;
