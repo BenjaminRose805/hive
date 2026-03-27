@@ -2285,8 +2285,20 @@ setInterval(async () => {
       for (const [key, w] of workers) {
         if (w.session === session) toRemove.push(key);
       }
-      for (const key of toRemove) workers.delete(key);
+      for (const key of toRemove) {
+        const w = workers.get(key);
+        if (w) {
+          for (const convo of conversationChannels.values()) {
+            convo.active.delete(w.workerId);
+            convo.observing.delete(w.workerId);
+          }
+          agentProcesses.delete(w.workerId);
+          workerChannelMap.delete(w.workerId);
+        }
+        workers.delete(key);
+      }
       if (toRemove.length > 0) {
+        persistConversationChannels();
         process.stderr.write(
           `hive-gateway: cleaned ${toRemove.length} stale worker(s) from dead session ${session}\n`,
         );

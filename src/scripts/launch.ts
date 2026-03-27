@@ -32,7 +32,6 @@ import {
   configDir,
   getAgentsJsonPath,
   getGatewayDir,
-  getGatewaySocket,
   getMasterGatewayDir,
   getMasterSocket,
   getPidsJsonPath,
@@ -978,7 +977,7 @@ function generateConfigs(names: string[], roles: Map<string, string>, args: Laun
     channelId: args.channelId,
     dashboardChannelId: args.channelId,
     guildId: "",
-    socketPath: getGatewaySocket(),
+    socketPath: getMasterSocket(),
     workers: gatewayWorkers,
   });
 
@@ -1012,7 +1011,7 @@ function generateConfigs(names: string[], roles: Map<string, string>, args: Laun
         isSpokesperson ? `${name},hive` : `${name},all-workers`,
         !isSpokesperson,
         roleTools,
-        getGatewaySocket(),
+        getMasterSocket(),
         globalSettings.mcpServers,
       ),
     );
@@ -1170,7 +1169,7 @@ async function launchHive(args: LaunchArgs): Promise<void> {
           isSpokesperson ? `${name},hive` : `${name},all-workers`,
           !isSpokesperson,
           roleTools,
-          getGatewaySocket(),
+          getMasterSocket(),
           loadGlobalSettings().mcpServers,
         ),
       );
