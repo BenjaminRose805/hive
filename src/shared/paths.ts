@@ -13,6 +13,14 @@ export function getSession(): string {
   return process.env.HIVE_SESSION ?? "hive";
 }
 
+export function getMasterSocket(): string {
+  return process.env.HIVE_MASTER_SOCKET ?? "/tmp/hive-gateway/master.sock";
+}
+
+export function getMasterGatewayDir(): string {
+  return dirname(getMasterSocket());
+}
+
 export function getGatewaySocket(): string {
   return process.env.HIVE_GATEWAY_SOCKET ?? "/tmp/hive-gateway/gateway.sock";
 }

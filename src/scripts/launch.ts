@@ -33,6 +33,8 @@ import {
   getAgentsJsonPath,
   getGatewayDir,
   getGatewaySocket,
+  getMasterGatewayDir,
+  getMasterSocket,
   getPidsJsonPath,
   getSession,
   getStateDir,
@@ -178,13 +180,32 @@ function resolveToken(args: LaunchArgs): string {
 // ---------------------------------------------------------------------------
 
 function launchGateway(token: string): string {
+  const masterSocket = getMasterSocket();
+  const masterDir = getMasterGatewayDir();
+
+  // Check if a shared gateway is already running and healthy
+  const healthCheck = run([
+    "curl", "-s", "--unix-socket", masterSocket, "http://localhost/health",
+  ]);
+  if (healthCheck.exitCode === 0 && healthCheck.stdout) {
+    try {
+      const json = JSON.parse(healthCheck.stdout);
+      if (json.status === "ok" && json.botId) {
+        console.log(`[hive] Reusing existing gateway (${json.connectedAs ?? "connected"})`);
+        return json.botId;
+      }
+    } catch { /* not valid JSON — fall through to start new gateway */ }
+  }
+
+  // No healthy gateway found — start a new one
   const scriptPath = join(getStateDir(), ".launch-gateway.sh");
   // Single-quoted heredoc prevents expansion; token passed via env
   const script = `#!/usr/bin/env bash
 export DISCORD_BOT_TOKEN='${token.replace(/'/g, "'\\''")}'
 export HIVE_DIR='${HIVE_DIR}'
-export HIVE_GATEWAY_SOCKET='${getGatewaySocket()}'
+export HIVE_GATEWAY_SOCKET='${masterSocket}'
 export HIVE_STATE_DIR='${getStateDir()}'
+export HIVE_SESSION='${getSession()}'
 bun run "$HIVE_DIR/bin/hive-gateway.ts" 2>&1
 echo "[hive] Gateway exited with code $?"
 read -p "Press enter to close..."
@@ -192,14 +213,14 @@ read -p "Press enter to close..."
   writeFileSync(scriptPath, script);
   chmodSync(scriptPath, 0o700);
 
-  // Kill any existing session and stale gateway socket
-  run(["tmux", "kill-session", "-t", getSession()]);
-  // Fuser kills any process holding the socket file
-  run(["fuser", "-k", getGatewaySocket()]);
+  // Kill any existing session's gateway window and stale socket
+  // NOTE: Only kill the gateway tmux window, NOT the entire tmux session
+  // (other projects may have workers in the same tmux server)
+  run(["tmux", "kill-window", "-t", `${getSession()}:gateway`]);
+  run(["fuser", "-k", masterSocket]);
   Bun.sleepSync(1000);
-  // Clean stale socket directory (not just socket — removes stale worker sockets too)
-  if (existsSync(getGatewayDir())) {
-    run(["rm", "-rf", getGatewayDir()]);
+  if (existsSync(masterDir)) {
+    run(["rm", "-rf", masterDir]);
   }
   // Remove hive sessions from tmux-resurrect save files to prevent tmux-continuum
   // from auto-restoring stale windows when a new tmux server starts
@@ -218,20 +239,23 @@ read -p "Press enter to close..."
         .map((f) => join(dir, f)),
     ]);
   }
-  runOrDie(["tmux", "new-session", "-d", "-s", getSession(), "-n", "gateway", scriptPath]);
+
+  // Create tmux session if it doesn't exist, or add gateway window
+  const sessionExists = run(["tmux", "has-session", "-t", getSession()]);
+  if (sessionExists.exitCode === 0) {
+    runOrDie(["tmux", "new-window", "-t", getSession(), "-n", "gateway", scriptPath]);
+  } else {
+    runOrDie(["tmux", "new-session", "-d", "-s", getSession(), "-n", "gateway", scriptPath]);
+  }
   console.log("[hive] Gateway starting...");
 
   // Give gateway time to start before polling
   Bun.sleepSync(5000);
 
-  // Health check loop (30s timeout)
+  // Health check loop (30s timeout) — use masterSocket
   for (let attempt = 0; attempt < 30; attempt++) {
     const health = run([
-      "curl",
-      "-s",
-      "--unix-socket",
-      getGatewaySocket(),
-      "http://localhost/health",
+      "curl", "-s", "--unix-socket", masterSocket, "http://localhost/health",
     ]);
     if (health.exitCode === 0 && health.stdout) {
       try {
@@ -253,6 +277,44 @@ read -p "Press enter to close..."
     Bun.sleepSync(1000);
   }
   throw new Error("Gateway health check timed out after 30s");
+}
+
+// ---------------------------------------------------------------------------
+// Worker registration
+// ---------------------------------------------------------------------------
+
+function registerWorkers(names: string[], roles: Map<string, string>, domains: Map<string, string>): void {
+  const masterSocket = getMasterSocket();
+  const session = getSession();
+
+  for (const name of names) {
+    const role = roles.get(name) ?? "engineer";
+    const isManager = role === "manager";
+    const isOracle = role === "product";
+    const isSpokesperson = isManager || isOracle;
+
+    const body = JSON.stringify({
+      workerId: name,
+      session,
+      mentionPatterns: isSpokesperson ? [name, "hive"] : [name, "all-workers"],
+      requireMention: !isSpokesperson,
+      role,
+      domain: domains.get(name),
+    });
+
+    const result = run([
+      "curl", "-s", "-X", "POST",
+      "--unix-socket", masterSocket,
+      "-H", "Content-Type: application/json",
+      "-d", body,
+      "http://localhost/register",
+    ]);
+
+    if (result.exitCode !== 0) {
+      console.warn(`[hive] Warning: failed to register worker ${name}`);
+    }
+  }
+  console.log(`[hive] Registered ${names.length} workers for session ${session}`);
 }
 
 // ---------------------------------------------------------------------------
@@ -687,7 +749,37 @@ function doTeardown(clean: boolean): void {
     }
   }
 
-  // 1. Kill mind daemon (tmux kill-session in step 2 handles workers)
+  // 1. Deregister workers from shared gateway
+  const masterSocket = getMasterSocket();
+  const deregResult = run([
+    "curl", "-s", "-X", "POST",
+    "--unix-socket", masterSocket,
+    "-H", "Content-Type: application/json",
+    "-d", JSON.stringify({ session: getSession() }),
+    "http://localhost/deregister",
+  ]);
+  if (deregResult.exitCode === 0) {
+    console.log(`[hive] Deregistered workers for session ${getSession()}`);
+  }
+
+  // Check if other sessions are still using the gateway
+  const healthResult = run([
+    "curl", "-s", "--unix-socket", masterSocket,
+    "http://localhost/health",
+  ]);
+  let otherSessionsExist = false;
+  if (healthResult.exitCode === 0 && healthResult.stdout) {
+    try {
+      const health = JSON.parse(healthResult.stdout);
+      // If there are still registered workers from other sessions, keep the gateway alive
+      if (health.registeredWorkers > 0) {
+        otherSessionsExist = true;
+        console.log(`[hive] Gateway still serving other sessions — keeping alive`);
+      }
+    } catch {}
+  }
+
+  // 2. Kill mind daemon (tmux kill-session in step 3 handles workers)
   const pidFile = join(HIVE_DIR, ".hive/mind/daemon.pid");
   if (existsSync(pidFile)) {
     try {
@@ -704,18 +796,36 @@ function doTeardown(clean: boolean): void {
     }
   }
 
-  // 2. Kill tmux session (terminates all worker processes)
-  const tmuxResult = run(["tmux", "kill-session", "-t", getSession()]);
-  if (tmuxResult.exitCode === 0) {
-    console.log(`[hive] Killed tmux session '${getSession()}'`);
+  // 3. Kill tmux session (or just worker windows if gateway is shared)
+  if (otherSessionsExist) {
+    // Kill all windows except gateway to preserve shared gateway for other sessions
+    const windowList = run(["tmux", "list-windows", "-t", getSession(), "-F", "#{window_name}"]);
+    if (windowList.exitCode === 0) {
+      for (const windowName of windowList.stdout.split("\n").filter(Boolean)) {
+        if (windowName === "gateway") continue;
+        run(["tmux", "kill-window", "-t", `${getSession()}:${windowName}`]);
+      }
+    }
+    console.log(`[hive] Killed worker windows (gateway preserved for other sessions)`);
+  } else {
+    // No other sessions — kill everything
+    const tmuxResult = run(["tmux", "kill-session", "-t", getSession()]);
+    if (tmuxResult.exitCode === 0) {
+      console.log(`[hive] Killed tmux session '${getSession()}'`);
+    }
+    // Remove master gateway socket dir
+    const masterDir = getMasterGatewayDir();
+    if (existsSync(masterDir)) {
+      run(["rm", "-rf", masterDir]);
+    }
   }
 
-  // 3. Remove gateway socket dir
+  // 4. Remove per-project relay socket dir
   if (existsSync(getGatewayDir())) {
     run(["rm", "-rf", getGatewayDir()]);
   }
 
-  // 4. Remove launch scripts, prompt files, and stale container configs
+  // 5. Remove launch scripts, prompt files, and stale container configs
   if (existsSync(getStateDir())) {
     try {
       for (const f of readdirSync(getStateDir())) {
@@ -732,7 +842,7 @@ function doTeardown(clean: boolean): void {
     }
   }
 
-  // 5. Update agents.json statuses
+  // 6. Update agents.json statuses
   if (existsSync(getAgentsJsonPath())) {
     try {
       const data = JSON.parse(readFileSync(getAgentsJsonPath(), "utf8")) as AgentsJson;
@@ -744,7 +854,7 @@ function doTeardown(clean: boolean): void {
     }
   }
 
-  // 6. Clear pids.json
+  // 7. Clear pids.json
   if (existsSync(getPidsJsonPath())) {
     writeFileSync(getPidsJsonPath(), "{}\n");
   }
@@ -1001,14 +1111,18 @@ async function launchHive(args: LaunchArgs): Promise<void> {
   // Launch gateway
   launchGateway(token);
 
+  // Register workers with the shared gateway
+  registerWorkers(args.agents, args.roles, args.domains);
+
   // Fetch per-worker channel IDs from gateway
   let workerChannels: Record<string, string> = {};
+  const masterSocket = getMasterSocket();
   const channelsRes = run([
     "curl",
     "-s",
     "--unix-socket",
-    getGatewaySocket(),
-    "http://localhost/channels",
+    masterSocket,
+    `http://localhost/channels?session=${encodeURIComponent(getSession())}`,
   ]);
   if (channelsRes.exitCode === 0 && channelsRes.stdout) {
     try {
@@ -1132,6 +1246,7 @@ export async function projectUp(args: string[]): Promise<void> {
   // Set per-project isolation env vars (read by paths.ts getters)
   process.env.HIVE_SESSION = `hive-${projectName}`;
   process.env.HIVE_PROJECT = projectName;
+  // Per-project relay socket path (used for MCP relay configs, not the shared gateway)
   process.env.HIVE_GATEWAY_SOCKET = `/tmp/hive-gateway-${projectName}/gateway.sock`;
   process.env.HIVE_STATE_DIR = join(HIVE_DIR, "state", projectName);
 

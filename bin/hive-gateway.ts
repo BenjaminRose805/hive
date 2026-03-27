@@ -275,6 +275,7 @@ function chunk(text: string, limit: number): string[] {
 
 interface WorkerEntry {
   workerId: string;
+  session: string;
   endpoint: string;
   mentionPatterns: string[];
   channelId: string;
@@ -290,12 +291,16 @@ const workers = new Map<string, WorkerEntry>();
 
 // Auto-populate workers from gateway config (no more self-registration needed —
 // inbound delivery uses tmux send-keys, not worker sockets)
+const DEFAULT_SESSION = process.env.HIVE_SESSION ?? "hive";
 try {
   if (existsSync(GATEWAY_CONFIG_PATH)) {
     const gwConfig = JSON.parse(readFileSync(GATEWAY_CONFIG_PATH, "utf8"));
     for (const w of gwConfig.workers ?? []) {
-      workers.set(w.workerId, {
+      const session = w.session ?? DEFAULT_SESSION;
+      const compositeKey = `${session}:${w.workerId}`;
+      workers.set(compositeKey, {
         workerId: w.workerId,
+        session,
         endpoint: w.socketPath ?? "",
         mentionPatterns: w.mentionPatterns ?? [],
         channelId: w.channelId ?? "",
@@ -311,6 +316,65 @@ try {
   }
 } catch (err) {
   process.stderr.write(`hive-gateway: failed to load gateway config: ${err}\n`);
+}
+
+// ---------------------------------------------------------------------------
+// Registration persistence
+// ---------------------------------------------------------------------------
+
+function persistRegistrations(): void {
+  try {
+    const data: Record<string, any> = {};
+    for (const [key, entry] of workers) {
+      data[key] = { ...entry };
+    }
+    const filePath = join(GATEWAY_DIR, "registrations.json");
+    const tmpPath = `${filePath}.tmp`;
+    writeFileSync(tmpPath, JSON.stringify(data, null, 2));
+    renameSync(tmpPath, filePath);
+  } catch (err) {
+    process.stderr.write(`hive-gateway: failed to persist registrations: ${err}\n`);
+  }
+}
+
+function loadRegistrations(): void {
+  try {
+    const filePath = join(GATEWAY_DIR, "registrations.json");
+    if (!existsSync(filePath)) return;
+    const data = JSON.parse(readFileSync(filePath, "utf8"));
+    for (const [key, entry] of Object.entries(data)) {
+      if (!workers.has(key)) {
+        workers.set(key, entry as WorkerEntry);
+      }
+    }
+    process.stderr.write(`hive-gateway: loaded ${Object.keys(data).length} registration(s) from disk\n`);
+  } catch (err) {
+    process.stderr.write(`hive-gateway: failed to load registrations: ${err}\n`);
+  }
+}
+
+loadRegistrations();
+
+// ---------------------------------------------------------------------------
+// Worker lookup helpers
+// ---------------------------------------------------------------------------
+
+function findWorkerByBareId(workerId: string): WorkerEntry | undefined {
+  for (const entry of workers.values()) {
+    if (entry.workerId === workerId) return entry;
+  }
+  return undefined;
+}
+
+function findCompositeKey(workerId: string, session?: string): string | undefined {
+  if (session) {
+    const key = `${session}:${workerId}`;
+    if (workers.has(key)) return key;
+  }
+  for (const [key, entry] of workers) {
+    if (entry.workerId === workerId) return key;
+  }
+  return undefined;
 }
 
 // ---------------------------------------------------------------------------
@@ -392,7 +456,7 @@ async function routeInbound(msg: Message, excludeSender?: string): Promise<void>
     }));
     const spokesperson = findSpokesperson(workerInfos);
     if (spokesperson) {
-      const worker = workers.get(spokesperson.workerId);
+      const worker = findWorkerByBareId(spokesperson.workerId);
       if (worker && !(excludeSender && worker.workerId === excludeSender)) {
         targets.push(worker);
         targeted.add(worker.workerId);
@@ -459,7 +523,7 @@ async function routeInbound(msg: Message, excludeSender?: string): Promise<void>
       for (const participantId of convo.active) {
         if (targeted.has(participantId)) continue;
         if (excludeSender && participantId === excludeSender) continue;
-        const worker = workers.get(participantId);
+        const worker = findWorkerByBareId(participantId);
         if (worker) {
           targets.push(worker);
           targeted.add(participantId);
@@ -515,7 +579,7 @@ async function routeInbound(msg: Message, excludeSender?: string): Promise<void>
     // Human messages and manager role bypass status-based suppression (always nudge)
     const alwaysNudge = isHumanMessage || worker.role === "manager";
     if ((alwaysNudge || shouldNudge(worker)) && !shouldDebounceNudge(worker.workerId)) {
-      const ok = await nudgeViaTmux(worker.workerId);
+      const ok = await nudgeViaTmux(`${worker.session}:${worker.workerId}`);
       if (ok) {
         process.stderr.write(
           `hive-gateway: delivered message to ${worker.workerId} inbox + nudge\n`,
@@ -551,10 +615,12 @@ function _buildChannelXml(
 
 const NUDGE_TEXT = "[hive] New message — check inbox";
 
-async function nudgeViaTmux(workerId: string): Promise<boolean> {
-  return withWorkerLock(workerId, async () => {
-    const SESSION_NAME = process.env.HIVE_SESSION ?? "hive";
-    const target = `${SESSION_NAME}:${workerId}`;
+async function nudgeViaTmux(compositeKey: string): Promise<boolean> {
+  const worker = workers.get(compositeKey);
+  const workerId = worker ? worker.workerId : compositeKey.includes(":") ? compositeKey.split(":").slice(1).join(":") : compositeKey;
+  const sessionName = worker ? worker.session : (DEFAULT_SESSION);
+  return withWorkerLock(compositeKey, async () => {
+    const target = `${sessionName}:${workerId}`;
     const bufName = `hive-${workerId}`;
     const tmpFile = join(GATEWAY_DIR, `.nudge-${workerId}-${Date.now()}.tmp`);
 
@@ -854,7 +920,7 @@ async function handleSlashBroadcast(interaction: ChatInputCommandInteraction): P
       attachments: [],
     };
     writeToInbox(worker.workerId, inboxMsg);
-    const ok = await nudgeViaTmux(worker.workerId);
+    const ok = await nudgeViaTmux(`${worker.session}:${worker.workerId}`);
     results.push(`\`${worker.workerId}\`: ${ok ? "delivered" : "inbox only (nudge failed)"}`);
   }
 
@@ -867,7 +933,7 @@ async function handleSlashAsk(interaction: ChatInputCommandInteraction): Promise
   const agentName = interaction.options.getString("agent", true);
   const message = interaction.options.getString("message", true);
 
-  const worker = workers.get(agentName);
+  const worker = findWorkerByBareId(agentName);
   if (!worker) {
     await interaction.reply({
       content: `Agent \`${agentName}\` is not registered. Use \`/agents\` to see registered agents.`,
@@ -887,7 +953,7 @@ async function handleSlashAsk(interaction: ChatInputCommandInteraction): Promise
     attachments: [],
   };
   writeToInbox(agentName, inboxMsg);
-  const ok = await nudgeViaTmux(agentName);
+  const ok = await nudgeViaTmux(`${worker.session}:${agentName}`);
 
   if (ok) {
     await interaction.editReply({ content: `Message delivered to \`${agentName}\`.` });
@@ -928,7 +994,7 @@ async function handleSlashAssign(interaction: ChatInputCommandInteraction): Prom
   const agentName = interaction.options.getString("agent", true);
   const task = interaction.options.getString("task", true);
 
-  const worker = workers.get(agentName);
+  const worker = findWorkerByBareId(agentName);
   if (!worker) {
     await interaction.reply({
       content: `Agent \`${agentName}\` is not registered. Use \`/agents\` to see registered agents.`,
@@ -951,8 +1017,7 @@ async function handleSlashAssign(interaction: ChatInputCommandInteraction): Prom
   ].join("\n");
 
   // Use worker's dedicated channel
-  const workerData = workers.get(agentName);
-  const chatId = workerData?.channelId || interaction.channelId;
+  const chatId = worker.channelId || interaction.channelId;
 
   // Create task channel for this assignment
   let taskChannelId: string | undefined;
@@ -975,7 +1040,7 @@ async function handleSlashAssign(interaction: ChatInputCommandInteraction): Prom
     ...(taskChannelId ? { taskChannelId } : {}),
   };
   writeToInbox(agentName, assignMsg);
-  const ok = await nudgeViaTmux(agentName);
+  const ok = await nudgeViaTmux(`${worker.session}:${agentName}`);
 
   if (ok) {
     await interaction.editReply({ content: `Task assigned to \`${agentName}\`:\n> ${task}` });
@@ -1201,7 +1266,7 @@ async function handleSlashSpinUp(interaction: ChatInputCommandInteraction): Prom
               parent: category.id,
             });
           }
-          const worker = workers.get(agentName);
+          const worker = findWorkerByBareId(agentName);
           if (worker) worker.channelId = ch.id;
           workerChannelMap.set(agentName, ch.id);
           writeFileSync(
@@ -1278,7 +1343,8 @@ async function handleSlashTearDown(interaction: ChatInputCommandInteraction): Pr
 
   try {
     // Kill the tmux window for this agent
-    const SESSION_NAME = process.env.HIVE_SESSION ?? "hive";
+    const tearDownWorker = findWorkerByBareId(agentName);
+    const SESSION_NAME = tearDownWorker?.session ?? DEFAULT_SESSION;
     Bun.spawnSync(["tmux", "kill-window", "-t", `${SESSION_NAME}:${agentName}`], {
       stdout: "pipe",
       stderr: "pipe",
@@ -1287,7 +1353,8 @@ async function handleSlashTearDown(interaction: ChatInputCommandInteraction): Pr
     agentProcesses.delete(agentName);
 
     // Deregister from workers map if present
-    workers.delete(agentName);
+    const compositeKeyToDelete = findCompositeKey(agentName);
+    if (compositeKeyToDelete) workers.delete(compositeKeyToDelete);
 
     // Remove agent from all conversation channels (prevent ghost participants)
     for (const convo of conversationChannels.values()) {
@@ -1433,8 +1500,12 @@ async function handleRegister(req: Request): Promise<Response> {
     return jsonErr("invalid workerId format", 400);
   }
 
-  const entry = {
+  const session = (body.session as string) ?? DEFAULT_SESSION;
+  const compositeKey = `${session}:${workerId}`;
+
+  const entry: WorkerEntry = {
     workerId,
+    session,
     endpoint: (body.endpoint as string) ?? "",
     mentionPatterns: (body.mentionPatterns as string[]) ?? [],
     channelId: (body.channelId as string) ?? "",
@@ -1446,20 +1517,66 @@ async function handleRegister(req: Request): Promise<Response> {
     statusSince: new Date().toISOString(),
   };
 
-  workers.set(workerId, entry);
+  workers.set(compositeKey, entry);
+  persistRegistrations();
 
   process.stderr.write(
-    `hive-gateway: registered worker ${workerId} -> channel ${body.channelId}\n`,
+    `hive-gateway: registered worker ${compositeKey} -> channel ${body.channelId}\n`,
   );
   return jsonOk();
 }
 
 async function handleDeregister(req: Request): Promise<Response> {
   const body = await readJson(req);
-  const workerId = body.workerId as string;
-  if (!workerId) return jsonErr("workerId required", 400);
-  workers.delete(workerId);
-  process.stderr.write(`hive-gateway: deregistered worker ${workerId}\n`);
+  const workerId = body.workerId as string | undefined;
+  const session = (body.session as string) ?? DEFAULT_SESSION;
+
+  // Bulk deregister: session provided without workerId — remove all workers for that session
+  if (!workerId && session) {
+    const toRemove: string[] = [];
+    for (const [key, w] of workers) {
+      if (w.session === session) toRemove.push(key);
+    }
+    for (const key of toRemove) {
+      const w = workers.get(key)!;
+      // Clean up related state
+      for (const convo of conversationChannels.values()) {
+        convo.active.delete(w.workerId);
+        convo.observing.delete(w.workerId);
+      }
+      agentProcesses.delete(w.workerId);
+      workerChannelMap.delete(w.workerId);
+      workers.delete(key);
+    }
+    if (toRemove.length > 0) persistConversationChannels();
+    persistRegistrations();
+    process.stderr.write(`hive-gateway: bulk deregistered ${toRemove.length} worker(s) for session ${session}\n`);
+    return jsonOk({ removed: toRemove.length });
+  }
+
+  if (!workerId) return jsonErr("workerId or session required", 400);
+
+  const compositeKey = `${session}:${workerId}`;
+  const entry = workers.get(compositeKey) ?? findWorkerByBareId(workerId);
+  const keyToDelete = workers.has(compositeKey) ? compositeKey : findCompositeKey(workerId);
+
+  if (keyToDelete) {
+    workers.delete(keyToDelete);
+  }
+
+  // Clean up related state
+  if (entry) {
+    for (const convo of conversationChannels.values()) {
+      convo.active.delete(workerId);
+      convo.observing.delete(workerId);
+    }
+    agentProcesses.delete(workerId);
+    workerChannelMap.delete(workerId);
+    persistConversationChannels();
+  }
+
+  persistRegistrations();
+  process.stderr.write(`hive-gateway: deregistered worker ${compositeKey}\n`);
   return jsonOk();
 }
 
@@ -1562,7 +1679,7 @@ async function handleSend(req: Request): Promise<Response> {
   // Resolve chat_id='auto' to the target agent's channel
   const targetAgent = body.target_agent as string | undefined;
   if (chatId === "auto" && targetAgent) {
-    const worker = workers.get(targetAgent);
+    const worker = findWorkerByBareId(targetAgent);
     if (worker?.channelId) {
       chatId = worker.channelId;
     } else {
@@ -1762,7 +1879,7 @@ async function handleSetStatus(req: Request): Promise<Response> {
     return jsonErr("status must be available, focused, or blocked", 400);
   }
 
-  const worker = workers.get(workerId);
+  const worker = findWorkerByBareId(workerId);
   if (!worker) return jsonErr(`unknown worker: ${workerId}`, 404);
 
   worker.status = status as "available" | "focused" | "blocked";
@@ -1779,7 +1896,7 @@ function handleGetWorkerStatus(url: URL): Response {
     return jsonErr("valid workerId required", 400);
   }
 
-  const worker = workers.get(workerId);
+  const worker = findWorkerByBareId(workerId);
   if (!worker) return jsonErr(`unknown worker: ${workerId}`, 404);
 
   return jsonOk({
@@ -1799,7 +1916,7 @@ async function handleNudge(req: Request): Promise<Response> {
     return jsonErr("invalid workerId format", 400);
   }
 
-  const worker = workers.get(workerId);
+  const worker = findWorkerByBareId(workerId);
   if (!worker) return jsonErr(`unknown worker: ${workerId}`, 404);
 
   // Smart nudge: focused/blocked workers only interrupted by critical priority
@@ -1815,7 +1932,7 @@ async function handleNudge(req: Request): Promise<Response> {
     return jsonOk({ nudged: false, reason: "debounced" });
   }
 
-  const ok = await nudgeViaTmux(workerId);
+  const ok = await nudgeViaTmux(`${worker.session}:${workerId}`);
   return ok ? jsonOk({ nudged: true }) : jsonErr("nudge failed");
 }
 
@@ -1828,10 +1945,12 @@ function handleHealth(): Response {
   }
   const workerList = [...workers.values()].map((w) => ({
     workerId: w.workerId,
+    session: w.session,
     channelId: w.channelId,
     status: w.status,
     statusSince: w.statusSince,
   }));
+  const sessions = [...new Set(workerList.map((w) => w.session))];
   return new Response(
     JSON.stringify({
       status: "ok",
@@ -1839,6 +1958,7 @@ function handleHealth(): Response {
       connectedAs: client.user?.tag ?? "unknown",
       botId: client.user?.id ?? null,
       registeredWorkers: workers.size,
+      sessions,
       workers: workerList,
     }),
     { headers: { "Content-Type": "application/json" } },
@@ -1864,7 +1984,7 @@ async function handleCreateChannel(req: Request): Promise<Response> {
   // Validate all participant names exist in workers map
   const allNames = [creator, ...participants];
   for (const name of allNames) {
-    if (!workers.has(name)) {
+    if (!findWorkerByBareId(name)) {
       return jsonErr(`unknown worker: ${name}`, 400);
     }
   }
@@ -1928,7 +2048,7 @@ async function handleCreateChannel(req: Request): Promise<Response> {
 
   // Build participant response with status info
   const participantInfo = allNames.map((name: string) => {
-    const worker = workers.get(name)!;
+    const worker = findWorkerByBareId(name)!;
     return {
       name,
       tier: activeSet.has(name) ? "active" : "observing",
@@ -1952,7 +2072,7 @@ async function handleAddToChannel(req: Request): Promise<Response> {
   const convo = conversationChannels.get(channelId);
   if (!convo) return jsonErr(`unknown conversation channel: ${channelId}`, 404);
 
-  const worker = workers.get(agent);
+  const worker = findWorkerByBareId(agent);
   if (!worker) return jsonErr(`unknown worker: ${agent}`, 404);
 
   // If already member, return early
@@ -1980,7 +2100,7 @@ async function handleAddToChannel(req: Request): Promise<Response> {
 
   // Nudge only if shouldNudge passes
   if (shouldNudge(worker) && !shouldDebounceNudge(agent)) {
-    await nudgeViaTmux(agent);
+    await nudgeViaTmux(`${worker.session}:${agent}`);
   }
 
   return jsonOk({
@@ -2103,7 +2223,19 @@ const server = Bun.serve({
     try {
       if (method === "GET" && path === "/health") return handleHealth();
       if (method === "GET" && path === "/channels") {
-        return new Response(JSON.stringify({ channels: Object.fromEntries(workerChannelMap) }), {
+        const sessionFilter = url.searchParams.get("session");
+        const filtered = new Map<string, string>();
+        for (const [key, channelId] of workerChannelMap) {
+          if (sessionFilter) {
+            const worker = findWorkerByBareId(key);
+            if (worker && worker.session === sessionFilter) {
+              filtered.set(key, channelId);
+            }
+          } else {
+            filtered.set(key, channelId);
+          }
+        }
+        return new Response(JSON.stringify({ channels: Object.fromEntries(filtered) }), {
           headers: { "Content-Type": "application/json" },
         });
       }
@@ -2132,6 +2264,37 @@ const server = Bun.serve({
 });
 
 process.stderr.write(`hive-gateway: listening on ${SOCKET_PATH}\n`);
+
+// ---------------------------------------------------------------------------
+// Stale session cleanup — remove workers whose tmux session has died
+// ---------------------------------------------------------------------------
+
+setInterval(async () => {
+  const sessions = new Set<string>();
+  for (const w of workers.values()) sessions.add(w.session);
+
+  for (const session of sessions) {
+    const check = Bun.spawn(["tmux", "has-session", "-t", session], {
+      stdout: "pipe",
+      stderr: "pipe",
+    });
+    const exit = await check.exited;
+    if (exit !== 0) {
+      // Session is dead — remove all workers for this session
+      const toRemove: string[] = [];
+      for (const [key, w] of workers) {
+        if (w.session === session) toRemove.push(key);
+      }
+      for (const key of toRemove) workers.delete(key);
+      if (toRemove.length > 0) {
+        process.stderr.write(
+          `hive-gateway: cleaned ${toRemove.length} stale worker(s) from dead session ${session}\n`,
+        );
+        persistRegistrations();
+      }
+    }
+  }
+}, 5 * 60 * 1000);
 
 // ---------------------------------------------------------------------------
 // Graceful shutdown
