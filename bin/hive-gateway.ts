@@ -33,7 +33,7 @@ import {
   Partials,
 } from "discord.js";
 import { extractAgentsList, parseBody, parseHeader } from "../src/gateway/protocol-parser.ts";
-import { shouldDeliver, type WorkerInfo } from "../src/gateway/selective-router.ts";
+import { shouldDeliver, shouldDeliverHumanMessage, findSpokesperson, type WorkerInfo } from "../src/gateway/selective-router.ts";
 import { MessageType } from "../src/gateway/types.ts";
 import type { DeltaFile } from "../src/mind/mind-types.ts";
 import { type AgentsJson, NO_WORKTREE_ROLES } from "../src/shared/agent-types.ts";
@@ -382,11 +382,31 @@ async function routeInbound(msg: Message, excludeSender?: string): Promise<void>
   const targets: WorkerEntry[] = [];
   const targeted = new Set<string>();
 
+  // Pass 0: Spokesperson routing — human messages go to oracle first
+  const isHumanMsg = !msg.author.bot;
+  if (isHumanMsg) {
+    const workerInfos = [...workers.values()].map((w) => ({
+      workerId: w.workerId,
+      channelId: w.channelId,
+      role: w.role,
+    }));
+    const spokesperson = findSpokesperson(workerInfos);
+    if (spokesperson) {
+      const worker = workers.get(spokesperson.workerId);
+      if (worker && !(excludeSender && worker.workerId === excludeSender)) {
+        targets.push(worker);
+        targeted.add(worker.workerId);
+      }
+    }
+  }
+
   // Pass 1: Channel owner + coordinator role
   for (const worker of workers.values()) {
     if (excludeSender && worker.workerId === excludeSender) continue;
 
     if (worker.role === "manager") {
+      // Human messages route through spokesperson, not directly to manager
+      if (isHumanMsg) continue;
       const workerInfo: WorkerInfo = {
         workerId: worker.workerId,
         channelId: worker.channelId,
@@ -415,6 +435,10 @@ async function routeInbound(msg: Message, excludeSender?: string): Promise<void>
 
     const mentioned = await isMentioned(msg, worker.mentionPatterns, effectiveChannelId);
     if (mentioned) {
+      // Human messages only reach non-spokesperson agents via their own channel or conversation channels
+      if (isHumanMsg && worker.role !== "product" && worker.role !== "manager") {
+        continue;
+      }
       const workerInfo: WorkerInfo = { workerId: worker.workerId, channelId: worker.channelId };
       const decision = shouldDeliver(parsed, workerInfo, msg.content, bodyAgents);
       if (decision.deliver) {
