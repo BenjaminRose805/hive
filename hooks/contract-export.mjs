@@ -128,7 +128,7 @@ if (!hasExportedTypes) {
   process.exit(0)
 }
 
-// --- Advisory warning ---
+// --- Hard deny for type/interface/enum exports ---
 // Extract the type/interface names for a helpful message
 const typeNames = []
 const typeMatches = contentToCheck.matchAll(/export\s+(?:interface|type|enum)\s+(\w+)/g)
@@ -137,18 +137,21 @@ for (const m of typeMatches) {
 }
 
 const reason = [
-  `CONTRACT ADVISORY: ${relPath} exports type(s): ${typeNames.join(', ')}`,
+  `CONTRACT VIOLATION: ${relPath} exports type(s): ${typeNames.join(', ')}`,
   ``,
-  `Convention: public types/interfaces should be re-exported through ${moduleDir}/contracts.ts.`,
-  `If these types are part of the module's public API, add them to contracts.ts.`,
-  `If they are internal-only, consider removing the 'export' keyword.`,
+  `Convention: exported types/interfaces/enums MUST live in ${moduleDir}/contracts.ts.`,
+  `Value exports (functions, constants) may live in any file.`,
+  ``,
+  `Move these type declarations to ${moduleDir}/contracts.ts, or define them there`,
+  `and import from contracts.ts where needed.`,
 ].join('\n')
 
-// Advisory only — allow but add context
+// Hard deny — type exports outside contracts.ts are blocked
 console.log(JSON.stringify({
   hookSpecificOutput: {
     hookEventName: 'PreToolUse',
-    additionalContext: reason,
+    permissionDecision: 'deny',
+    permissionDecisionReason: reason,
   },
 }))
 process.exit(0)
