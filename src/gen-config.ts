@@ -897,6 +897,17 @@ function generateSingleBot(args: Args): void {
         ],
       });
 
+      // Block AskUserQuestion — agents must use Discord instead
+      mergedHooks.PreToolUse.push({
+        matcher: "AskUserQuestion",
+        hooks: [
+          {
+            type: "command",
+            command: `node "${join(HIVE_ROOT, "hooks", "intercept-ask-user.mjs")}"`,
+          },
+        ],
+      });
+
       const workerSettings = { hooks: mergedHooks };
       writeFileSync(join(workerDir, "settings.json"), JSON.stringify(workerSettings, null, 2));
       console.log(`  CREATE  state/workers/${name}/settings.json`);
