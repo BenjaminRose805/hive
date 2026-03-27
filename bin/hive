@@ -75,6 +75,11 @@ switch (subcommand) {
     await m.main(subArgs)
     break
   }
+  case 'conflicts': {
+    const m = await import('../src/scripts/conflict-detector.ts')
+    await m.main(subArgs)
+    break
+  }
 
   // Utilities
   case 'gen-config': {
@@ -107,6 +112,7 @@ Direct commands (standalone):
   teardown            Stop all running sessions
   status              Check running hive status
   integrate           Merge completed worker branches
+  conflicts           Detect file conflicts between agent branches
 
 Utilities:
   gen-config          Generate per-worker configuration files
