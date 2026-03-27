@@ -338,6 +338,9 @@ function buildTeamRoster(self: string, members: TeamMember[]): string {
       case "writer":
         lines.push(`- **Documentation, guides, API docs** → ${names}`);
         break;
+      case "product":
+        lines.push(`- **Product decisions, user-facing communication, human interface** → ${names}`);
+        break;
     }
   }
   return lines.join("\n");
@@ -538,7 +541,9 @@ cd '${workDir}'
   const initPrompt =
     role === "manager"
       ? `You are ${name}, the Hive coordinator for project repo: ${args.projectRepo}. Your Discord channel ID is ${workerChannelId}. IMPORTANT: ALWAYS use this channel ID (${workerChannelId}) as the chat_id when calling discord__reply — never use a channel ID from an incoming message. This is YOUR channel. Read state/agents.json to learn each agent's name, role, and domain. First, announce yourself on Discord with "STATUS | ${name} | - | READY" followed by a brief message with personality — you're the coordinator, set the tone for the team. Then wait for agents to announce themselves as READY. You do NOT start work autonomously — wait for the user to tell you what to build. When instructed, decompose the project into tasks and assign them to agents by name.`
-      : `You are ${name} (${role}${domainLabel}) on a Hive team with a coordinator and other agents. Your Discord channel ID is ${workerChannelId} — ALWAYS use this numeric ID (${workerChannelId}) as the chat_id when calling discord__reply, never use a channel ID from incoming messages. Announce yourself as READY on Discord with personality (see your system prompt for details) and wait for task assignment.`;
+      : role === "product"
+        ? `You are ${name}, the human interface for this Hive team. You are the ONLY agent humans talk to directly. Your Discord channel ID is ${workerChannelId} — ALWAYS use this numeric ID (${workerChannelId}) as the chat_id when calling discord__reply, never use a channel ID from incoming messages. You translate human intent into clear requirements for the team, and translate team output into human-friendly updates. Announce yourself as READY on Discord. You respond to all human messages without needing a mention.`
+        : `You are ${name} (${role}${domainLabel}) on a Hive team with a coordinator and other agents. Your Discord channel ID is ${workerChannelId} — ALWAYS use this numeric ID (${workerChannelId}) as the chat_id when calling discord__reply, never use a channel ID from incoming messages. Announce yourself as READY on Discord with personality (see your system prompt for details) and wait for task assignment.`;
   run(["tmux", "send-keys", "-t", `${getSession()}:${name}`, initPrompt, "Enter"]);
 
   console.log(`[hive] Started ${name} (${role})`);
@@ -816,14 +821,17 @@ function generateConfigs(names: string[], roles: Map<string, string>, args: Laun
     const role = roles.get(name) ?? "engineer";
     const domain = args.domains.get(name);
     const isManager = role === "manager";
+    const isOracle = role === "product";
+    const isSpokesperson = isManager || isOracle;
     return {
       workerId: name,
       socketPath: `${getGatewayDir()}/${name}.sock`,
       channelId: "",
-      mentionPatterns: isManager ? [name, "hive"] : [name, "all-workers"],
-      requireMention: !isManager,
+      mentionPatterns: isSpokesperson ? [name, "hive"] : [name, "all-workers"],
+      requireMention: !isSpokesperson,
       role,
       ...(domain ? { domain } : {}),
+      ...(isSpokesperson ? { isSpokesperson: true } : {}),
     };
   });
 
@@ -849,6 +857,8 @@ function generateConfigs(names: string[], roles: Map<string, string>, args: Laun
     ensureDir(workerDir);
     const role = roles.get(name) ?? "engineer";
     const isManager = role === "manager";
+    const isOracle = role === "product";
+    const isSpokesperson = isManager || isOracle;
     const roleTools = resolveToolsForRole(
       role,
       name,
@@ -865,8 +875,8 @@ function generateConfigs(names: string[], roles: Map<string, string>, args: Laun
         name,
         `${getGatewayDir()}/${name}.sock`,
         args.channelId,
-        isManager ? `${name},hive` : `${name},all-workers`,
-        !isManager,
+        isSpokesperson ? `${name},hive` : `${name},all-workers`,
+        !isSpokesperson,
         roleTools,
         getGatewaySocket(),
         globalSettings.mcpServers,

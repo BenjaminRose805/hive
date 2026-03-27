@@ -78,6 +78,7 @@ interface GatewayWorkerConfig {
   requireMention: boolean;
   role: string;
   domain?: string;
+  isSpokesperson?: boolean;
 }
 
 interface GatewayConfigJson {
@@ -786,14 +787,17 @@ function generateSingleBot(args: Args): void {
     const role = args.agentRoles.get(name) ?? "engineer";
     const domain = args.agentDomains.get(name);
     const isManager = role === "manager";
+    const isOracle = role === "product";
+    const isSpokesperson = isManager || isOracle;
     return {
       workerId: name,
       socketPath: `/tmp/hive-gateway/${name}.sock`,
       channelId: "",
-      mentionPatterns: isManager ? [name, "hive"] : [name, "all-workers"],
-      requireMention: !isManager,
+      mentionPatterns: isSpokesperson ? [name, "hive"] : [name, "all-workers"],
+      requireMention: !isSpokesperson,
       role,
       ...(domain ? { domain } : {}),
+      ...(isSpokesperson ? { isSpokesperson: true } : {}),
     };
   });
 
@@ -827,6 +831,8 @@ function generateSingleBot(args: Args): void {
 
     const agentRole = args.agentRoles.get(name) ?? "engineer";
     const isManager = agentRole === "manager";
+    const isOracle = agentRole === "product";
+    const isSpokesperson = isManager || isOracle;
     const roleTools = resolveToolsForRole(
       agentRole,
       name,
@@ -841,12 +847,12 @@ function generateSingleBot(args: Args): void {
       allowFrom: [],
       groups: {
         [args.channelId]: {
-          requireMention: !isManager,
+          requireMention: !isSpokesperson,
           allowFrom: [],
         },
       },
       pending: {},
-      mentionPatterns: isManager ? [name, "hive"] : [name, "all-workers"],
+      mentionPatterns: isSpokesperson ? [name, "hive"] : [name, "all-workers"],
     };
 
     const globalSettings = loadGlobalSettings();
@@ -859,8 +865,8 @@ function generateSingleBot(args: Args): void {
         name,
         `/tmp/hive-gateway/${name}.sock`,
         args.channelId,
-        isManager ? `${name},hive` : `${name},all-workers`,
-        !isManager,
+        isSpokesperson ? `${name},hive` : `${name},all-workers`,
+        !isSpokesperson,
         roleTools,
         undefined,
         globalSettings.mcpServers,
