@@ -1012,6 +1012,8 @@ async function launchHive(args: LaunchArgs): Promise<void> {
       const workerDir = join(getStateDir(), "workers", name);
       const role = args.roles.get(name) ?? "engineer";
       const isManager = role === "manager";
+      const isOracle = role === "product";
+      const isSpokesperson = isManager || isOracle;
       const roleTools = resolveToolsForRole(
         role,
         name,
@@ -1027,8 +1029,8 @@ async function launchHive(args: LaunchArgs): Promise<void> {
           name,
           `${getGatewayDir()}/${name}.sock`,
           channelId,
-          isManager ? `${name},hive` : `${name},all-workers`,
-          !isManager,
+          isSpokesperson ? `${name},hive` : `${name},all-workers`,
+          !isSpokesperson,
           roleTools,
           getGatewaySocket(),
           loadGlobalSettings().mcpServers,
@@ -1128,6 +1130,14 @@ export async function projectDown(args: string[]): Promise<void> {
 
 /** Teardown --clean, remove state, call projectUp */
 export async function projectFresh(args: string[]): Promise<void> {
+  // Set env vars BEFORE teardown so it targets the correct project state
+  const projectName = args.find((a) => !a.startsWith("-"));
+  if (projectName) {
+    process.env.HIVE_SESSION = `hive-${projectName}`;
+    process.env.HIVE_GATEWAY_SOCKET = `/tmp/hive-gateway-${projectName}/gateway.sock`;
+    process.env.HIVE_STATE_DIR = join(HIVE_DIR, "state", projectName);
+  }
+
   doTeardown(true);
 
   // Remove state dir contents (but keep the directory)
