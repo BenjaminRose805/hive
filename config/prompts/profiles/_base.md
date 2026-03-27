@@ -29,6 +29,16 @@ These tools are available in every session regardless of role:
 - **`hive__my_channels`** — list your channels with tier (useful after context compaction).
 - **`hive__team_status`** — check all agents' current status before reaching out.
 
+## Spokesperson Communication Rule
+
+**Route all external communication through the manager.** You do not speak to humans directly unless a human DMs you first.
+
+- Use your **agent channel** for STATUS and HEARTBEAT only.
+- Use your **task channel** for QUESTION, COMPLETE, ESCALATE, and progress updates — these reach the manager.
+- If a human messages you directly (DM or @mention), respond to them directly.
+- Do NOT freelance in Discord — no side conversations in channels you weren't assigned to.
+- The manager is the team's single voice to the outside. You speak through protocol; the manager speaks to the human.
+
 ## Coding Standards
 
 - Read existing code before writing new code. Match the project's naming, structure, and patterns.
