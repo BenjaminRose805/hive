@@ -46,20 +46,20 @@ if (!isPush) {
 
 // --- Find modified contracts.ts files ---
 // Check git diff between current branch and its merge-base with master
-import { execSync } from 'child_process'
+import { execFileSync } from 'child_process'
 
 const cwd = process.env.cwd || process.cwd()
 
 let changedFiles = []
 try {
   // Get files changed on this branch vs master
-  const mergeBase = execSync('git merge-base HEAD master', { cwd, encoding: 'utf-8' }).trim()
-  const diff = execSync(`git diff --name-only ${mergeBase} HEAD`, { cwd, encoding: 'utf-8' }).trim()
+  const mergeBase = execFileSync('git', ['merge-base', 'HEAD', 'master'], { cwd, encoding: 'utf-8' }).trim()
+  const diff = execFileSync('git', ['diff', '--name-only', mergeBase, 'HEAD'], { cwd, encoding: 'utf-8' }).trim()
   changedFiles = diff ? diff.split('\n') : []
 } catch {
   // If merge-base fails (e.g. no master), check staged + unstaged
   try {
-    const diff = execSync('git diff --name-only HEAD~1 HEAD', { cwd, encoding: 'utf-8' }).trim()
+    const diff = execFileSync('git', ['diff', '--name-only', 'HEAD~1', 'HEAD'], { cwd, encoding: 'utf-8' }).trim()
     changedFiles = diff ? diff.split('\n') : []
   } catch {
     // No commits to check
@@ -106,8 +106,8 @@ for (const contractFile of changedContracts) {
     const mindUpdated = new Date(mindEntry.updated).getTime()
 
     // Get the commit timestamp of the contracts.ts change
-    const commitTime = execSync(
-      `git log -1 --format=%aI -- "${contractFile}"`,
+    const commitTime = execFileSync(
+      'git', ['log', '-1', '--format=%aI', '--', contractFile],
       { cwd, encoding: 'utf-8' }
     ).trim()
     const fileUpdated = new Date(commitTime).getTime()
