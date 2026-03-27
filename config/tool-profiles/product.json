@@ -1,0 +1,5 @@
+{
+  "role": "product",
+  "description": "Human spokesperson — requirements extraction, progress reporting, escalation handling. No code tools.",
+  "tools": ["web-fetch", "web-search"]
+}
