@@ -897,6 +897,28 @@ function generateSingleBot(args: Args): void {
         ],
       });
 
+      // Add contract export advisory hook (flags exported types outside contracts.ts)
+      mergedHooks.PreToolUse.push({
+        matcher: "Write|Edit",
+        hooks: [
+          {
+            type: "command",
+            command: `node "${join(HIVE_ROOT, "hooks", "contract-export.mjs")}"`,
+          },
+        ],
+      });
+
+      // Add contract publish enforcement hook (blocks push without Mind publish)
+      mergedHooks.PreToolUse.push({
+        matcher: "Bash",
+        hooks: [
+          {
+            type: "command",
+            command: `node "${join(HIVE_ROOT, "hooks", "contract-publish.mjs")}"`,
+          },
+        ],
+      });
+
       const workerSettings = { hooks: mergedHooks };
       writeFileSync(join(workerDir, "settings.json"), JSON.stringify(workerSettings, null, 2));
       console.log(`  CREATE  state/workers/${name}/settings.json`);
