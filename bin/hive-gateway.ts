@@ -359,11 +359,30 @@ loadRegistrations();
 // Worker lookup helpers
 // ---------------------------------------------------------------------------
 
-function findWorkerByBareId(workerId: string): WorkerEntry | undefined {
-  for (const entry of workers.values()) {
-    if (entry.workerId === workerId) return entry;
+function findWorkerByBareId(workerId: string, session?: string): WorkerEntry | undefined {
+  // Prefer session-scoped composite key lookup when session is provided
+  if (session) {
+    const entry = workers.get(`${session}:${workerId}`);
+    if (entry) return entry;
   }
-  return undefined;
+
+  // Fall back to bare ID scan
+  let match: WorkerEntry | undefined;
+  let count = 0;
+  for (const entry of workers.values()) {
+    if (entry.workerId === workerId) {
+      if (!match) match = entry;
+      count++;
+    }
+  }
+
+  if (count > 1 && !session) {
+    process.stderr.write(
+      `hive-gateway: ambiguous bare ID "${workerId}" matches ${count} workers across sessions — pass session for disambiguation\n`,
+    );
+  }
+
+  return match;
 }
 
 function findCompositeKey(workerId: string, session?: string): string | undefined {
@@ -1678,8 +1697,9 @@ async function handleSend(req: Request): Promise<Response> {
 
   // Resolve chat_id='auto' to the target agent's channel
   const targetAgent = body.target_agent as string | undefined;
+  const senderSession = (body.session as string) ?? undefined;
   if (chatId === "auto" && targetAgent) {
-    const worker = findWorkerByBareId(targetAgent);
+    const worker = findWorkerByBareId(targetAgent, senderSession);
     if (worker?.channelId) {
       chatId = worker.channelId;
     } else {
@@ -1873,13 +1893,14 @@ async function handleSetStatus(req: Request): Promise<Response> {
   const body = await readJson(req);
   const workerId = body.workerId as string;
   const status = body.status as string;
+  const session = (body.session as string) ?? undefined;
 
   if (!workerId) return jsonErr("workerId required", 400);
   if (!["available", "focused", "blocked"].includes(status)) {
     return jsonErr("status must be available, focused, or blocked", 400);
   }
 
-  const worker = findWorkerByBareId(workerId);
+  const worker = findWorkerByBareId(workerId, session);
   if (!worker) return jsonErr(`unknown worker: ${workerId}`, 404);
 
   worker.status = status as "available" | "focused" | "blocked";
@@ -1910,13 +1931,14 @@ async function handleNudge(req: Request): Promise<Response> {
   const body = await readJson(req);
   const workerId = body.workerId as string;
   const priority = (body.priority as string) ?? "info";
+  const session = (body.session as string) ?? undefined;
 
   if (!workerId) return jsonErr("workerId required", 400);
   if (!/^[a-zA-Z0-9-]{1,32}$/.test(workerId)) {
     return jsonErr("invalid workerId format", 400);
   }
 
-  const worker = findWorkerByBareId(workerId);
+  const worker = findWorkerByBareId(workerId, session);
   if (!worker) return jsonErr(`unknown worker: ${workerId}`, 404);
 
   // Smart nudge: focused/blocked workers only interrupted by critical priority
@@ -2227,7 +2249,7 @@ const server = Bun.serve({
         const filtered = new Map<string, string>();
         for (const [key, channelId] of workerChannelMap) {
           if (sessionFilter) {
-            const worker = findWorkerByBareId(key);
+            const worker = findWorkerByBareId(key, sessionFilter ?? undefined);
             if (worker && worker.session === sessionFilter) {
               filtered.set(key, channelId);
             }
