@@ -917,6 +917,17 @@ function generateSingleBot(args: Args): void {
         ],
       });
 
+      // Add OMC mode enforcement hook to PreToolUse (Write|Edit only)
+      mergedHooks.PreToolUse.push({
+        matcher: "Write|Edit",
+        hooks: [
+          {
+            type: "command",
+            command: `node "${join(HIVE_ROOT, "hooks", "enforce-omc-mode.mjs")}"`,
+          },
+        ],
+      });
+
       const workerSettings = { hooks: mergedHooks };
       writeFileSync(join(workerDir, "settings.json"), JSON.stringify(workerSettings, null, 2));
       console.log(`  CREATE  state/workers/${name}/settings.json`);
