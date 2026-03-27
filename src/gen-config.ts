@@ -888,7 +888,7 @@ function generateSingleBot(args: Args): void {
       // Add scope enforcement hook to PreToolUse
       if (!mergedHooks.PreToolUse) mergedHooks.PreToolUse = [];
       mergedHooks.PreToolUse.push({
-        matcher: "Write|Edit|Bash",
+        matcher: "Write|Edit|NotebookEdit|Bash",
         hooks: [
           {
             type: "command",
