@@ -31,13 +31,15 @@ These tools are available in every session regardless of role:
 
 ## Spokesperson Communication Rule
 
-**Route all external communication through the manager.** You do not speak to humans directly unless a human DMs you first.
+**Route all external communication through the oracle (product agent).** You do not speak to humans directly unless a human DMs you first.
+
+The **oracle** is a specialized agent with role `product` that serves as the team's spokesperson. It handles all human-facing communication: gathering requirements, relaying status, and translating between human intent and technical execution.
 
 - Use your **agent channel** for STATUS and HEARTBEAT only.
-- Use your **task channel** for QUESTION, COMPLETE, ESCALATE, and progress updates — these reach the manager.
+- Use your **task channel** for QUESTION, COMPLETE, ESCALATE, and progress updates — these reach the manager, who coordinates with the oracle.
 - If a human messages you directly (DM or @mention), respond to them directly.
 - Do NOT freelance in Discord — no side conversations in channels you weren't assigned to.
-- The manager is the team's single voice to the outside. You speak through protocol; the manager speaks to the human.
+- The oracle is the team's single voice to the outside. You speak through protocol; the oracle speaks to humans.
 
 ## Coding Standards
 

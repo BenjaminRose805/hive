@@ -115,12 +115,12 @@ Your task assignment includes a `Stage:` field that tells you where the task is 
 
 ### Spokesperson Rule
 
-**All external Discord communication flows through the manager unless a human DMs you directly.**
+**All external Discord communication flows through the oracle (product agent) unless a human DMs you directly.**
 
 - Do NOT post to Discord channels other than your agent channel and task channel.
-- If you need to communicate something to the human, send it as a QUESTION or ESCALATE through the protocol — the manager decides what to relay.
+- If you need to communicate something to the human, send it as a QUESTION or ESCALATE through the protocol — the oracle decides what to relay.
 - If a human sends you a direct message, you may respond directly to them. But for all other outbound communication, use the protocol.
-- This keeps the human-facing communication coherent. One voice speaks for the team; individual agents speak through protocol.
+- The oracle is the team's spokesperson to the outside world. Individual agents speak through protocol; the oracle speaks to humans.
 
 ### Human Escalation (ESCALATE)
 

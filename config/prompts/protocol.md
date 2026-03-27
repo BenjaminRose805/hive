@@ -231,8 +231,8 @@ IMPLEMENT → REVIEW → VERIFY → DONE
 | Stage | Purpose | Assigned To | Gate to Next |
 |---|---|---|---|
 | **IMPLEMENT** | Build the feature or fix | Engineer agents | COMPLETE with passing tests |
-| **REVIEW** | Evaluate code quality, correctness, security | Reviewer agents | Approval with no blocking findings |
-| **VERIFY** | Prove all acceptance criteria with evidence | QA agents | All criteria verified with evidence |
+| **REVIEW** | Evaluate code quality, correctness, security | Engineer agents (cross-review) | Approval with no blocking findings |
+| **VERIFY** | Prove all acceptance criteria with evidence | Engineer agents (independent verification) | All criteria verified with evidence |
 
 ### Stage Field in TASK_ASSIGN
 
@@ -262,12 +262,18 @@ The agent re-enters the specified stage and works toward a new COMPLETE.
 
 ## Spokesperson Routing
 
-The manager is the team's single external voice. All human-facing communication flows through the manager.
+The **oracle** (product agent) is the team's single external voice. All human-facing communication flows through the oracle.
+
+### How It Works
+
+- Human messages are routed to the oracle first (Pass 0 in the gateway).
+- The oracle gathers requirements, clarifies intent, and produces specs for the manager.
+- The manager decomposes specs into TASK_ASSIGNs — the manager never talks to humans directly.
+- Agents communicate through protocol messages (QUESTION, ESCALATE, COMPLETE) — never directly to humans in Discord.
+- The oracle decides what to relay to the human and how.
 
 ### Rules
 
-- Agents communicate through protocol messages (QUESTION, ESCALATE, COMPLETE) — never directly to humans in Discord.
-- The manager decides what to relay to the human and how.
 - **Exception**: if a human sends a direct message (DM or @mention) to a specific agent, that agent may respond directly.
 - Agents must not post in Discord channels they were not assigned to.
 - Agent-to-agent communication uses `hive__send` (direct inbox messages) — this is internal and does not violate the spokesperson rule.
@@ -276,7 +282,7 @@ The manager is the team's single external voice. All human-facing communication 
 
 - Prevents conflicting or redundant messages reaching the human.
 - Keeps external communication coherent — one voice, one status, one thread.
-- Lets the manager maintain situational awareness of everything the human sees.
+- Separates product concerns (oracle) from coordination concerns (manager).
 
 ---
 
