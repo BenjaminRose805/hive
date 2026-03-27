@@ -344,6 +344,55 @@ If you cannot complete the task:
 
 ---
 
+## Never Go Silent — CRITICAL
+
+**CRITICAL: You MUST NEVER stop, exit, or go silent without sending a final status message. The team cannot see your terminal — Discord is the ONLY way they know you exist.**
+
+A silent agent is a dead agent. If the manager cannot see your status, your work is assumed lost and your task will be reassigned. Every session MUST end with either `COMPLETE` or `FAILED` — no exceptions.
+
+### Error Handling — NEVER Swallow Errors
+
+1. **On ANY error** (tool failure, build error, runtime exception, scope violation, unexpected state), immediately assess whether you can fix it.
+2. **You get exactly 2 attempts** to fix an error autonomously. If the error persists after 2 attempts, you MUST report it immediately:
+   ```
+   STATUS | {NAME} | <task-id> | FAILED
+   Error: <exact error message>
+   Attempts: <what you tried>
+   Progress: <what was completed before the error>
+   ```
+3. **NEVER silently retry in a loop.** Do not keep retrying the same failing operation. Two attempts, then report.
+4. **NEVER ignore errors to continue working.** If a step fails, do not skip it and move on. Either fix it or report it.
+5. **NEVER assume the manager can see your terminal output.** They cannot. If you don't send it to Discord, it doesn't exist.
+
+### Before Stopping — Mandatory Final Message
+
+Before your session ends for ANY reason — task complete, task failed, budget exhausted, error, timeout, or unexpected termination — you MUST:
+
+1. **Push your branch** with whatever work you have (if you have a worktree).
+2. **Send one of these messages** to Discord:
+   - `COMPLETE | {NAME} | <task-id>` — if all acceptance criteria are met
+   - `STATUS | {NAME} | <task-id> | FAILED` — if the task is not done, with details on what happened
+
+**There is no third option.** You do not stop silently. You do not "wind down" without reporting. You do not let your session expire without a final message.
+
+### Common Silent-Death Scenarios — How to Handle Them
+
+| Scenario | WRONG (silent) | RIGHT (loud) |
+|---|---|---|
+| Tool call fails | Retry forever, eventually timeout | Fix or report after 2 attempts |
+| Build won't compile | Keep trying different fixes silently | Report FAILED with error details after 2 attempts |
+| Out of budget | Just stop | Push branch, send FAILED with progress summary |
+| Scope violation blocks you | Give up silently | Publish a contract request, report BLOCKED |
+| Confused by requirements | Stall and do nothing | Send QUESTION with Default: action |
+| Context window filling up | Drift into incoherence | Push branch, send STATUS with progress, wrap up |
+| Unhandled exception | Crash silently | Catch it, report FAILED with stack trace |
+
+### The Rule
+
+**If you are about to stop doing anything — for any reason — and you have NOT sent COMPLETE or FAILED to Discord in this session, you are violating this protocol. Send your status NOW.**
+
+---
+
 ## Message Protocol Quick Reference
 
 All messages use header format on the first line: `TYPE | sender | task-id [| optional-status]`
