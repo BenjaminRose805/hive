@@ -1,216 +1,232 @@
-# Hive Message Protocol
+# Hive Task Contract Protocol
 
 ## Overview
 
-All inter-session communication between the Hive manager and agent sessions uses the message types defined in this document. Messages are posted to a shared Discord channel that all sessions monitor.
+Task lifecycle is managed through **MCP tool calls** (`hive__task_*`), not free-text Discord messages. Each task is a **contract** — a JSON document stored at `.hive/tasks/<task-id>.json` that tracks phase, acceptance criteria, process checklist, and audit history.
 
-Messages are plain text (no embeds). The soft length limit is **1800 characters** to avoid Discord's 2000-character hard limit causing unexpected message splits. If a task specification exceeds this, write the full spec to a file in the project repository and reference it by path in the TASK_ASSIGN message.
+Discord is used only for: HEARTBEAT liveness signals, ESCALATE human decisions, INTEGRATE merge coordination, and the initial READY announcement.
 
-### Header Format
+### Task Contract Structure
 
-The first line of every message is the header:
+Every task contract contains:
+- `id` — unique task identifier
+- `title` — short task title
+- `description` — full task description
+- `assignee` — agent name
+- `acceptance` — list of acceptance criteria
+- `process` — checklist items with status (PASS/FAIL/N/A/PENDING)
+- `files` — scoped file paths
+- `dependencies` — dependent task IDs
+- `stage` — pipeline stage (IMPLEMENT, REVIEW, VERIFY)
+- `phase` — current lifecycle phase
+- `history` — audit trail of all phase transitions
+
+### Task Phases
 
 ```
-TYPE | sender | task-id [| optional-status]
+ASSIGNED → ACCEPTED → IN_PROGRESS → REVIEW → VERIFY → COMPLETE
+                          ↓                              ↓
+                        FAILED                         FAILED
 ```
 
-- `TYPE` — message type (uppercase, one of the eight types below)
-- `sender` — `{agent-name}` (e.g. `alice`, `bob`) or `manager`
-- `task-id` — short identifier for the task (omitted in HEARTBEAT and INTEGRATE)
-- `optional-status` — included only in STATUS messages
-
-### Body Format
-
-Body lines follow the header. Each line is a key-value pair:
-
-```
-Key: value
-```
-
-Multi-line values use indentation or continuation lines as appropriate for readability.
+Phases are sequential — you cannot skip or go backward. The phase order is:
+`ASSIGNED` (0) → `ACCEPTED` (1) → `IN_PROGRESS` (2) → `REVIEW` (3) → `VERIFY` (4) → `COMPLETE` (5) / `FAILED` (5)
 
 ---
 
-## Message Types
+## Task Lifecycle Tools
 
-### 1. TASK_ASSIGN — Manager → Agent
+### 1. hive__task_create — Manager → Agent
 
-Assigns a task to a specific agent session.
+Creates a new task contract. Sets phase to ASSIGNED. The assigned agent receives the contract via inbox.
 
 ```
-TASK_ASSIGN | alice | <task-id>
-Branch: hive/alice
-Files: src/auth/, src/middleware/auth.ts
-Description: Implement JWT authentication middleware
-Acceptance: - POST /login returns JWT; - Protected routes return 401 without token
-Dependencies: none
-Budget: $5.00
-Stage: IMPLEMENT
-Mode: required /ralph
+hive__task_create({
+  id: "auth-middleware",
+  title: "Implement JWT authentication",
+  description: "Add JWT auth middleware with login endpoint and token validation",
+  assignee: "alice",
+  acceptance: [
+    "POST /login returns JWT",
+    "Protected routes return 401 without token",
+    "Token refresh flow works"
+  ],
+  process: [
+    { name: "notepad_write_priority at ACCEPT", status: "PENDING" },
+    { name: "explore before coding", status: "PENDING" },
+    { name: "lsp_diagnostics 0 errors", status: "PENDING" },
+    { name: "/code-review before COMPLETE", status: "PENDING" }
+  ],
+  files: ["src/auth/", "src/middleware/auth.ts"],
+  dependencies: [],
+  stage: "IMPLEMENT"
+})
 ```
 
-Fields:
-- `Branch` — the git branch the agent should create and work on
-- `Files` — files or directories the agent is expected to touch
-- `Description` — plain-language description of the task
-- `Acceptance` — list of criteria that define done; each criterion starts with `-`
-- `Dependencies` — other task IDs that must complete first, or `none`
-- `Budget` — maximum cost budget for this task (agent monitors and self-limits)
-- `Stage` — pipeline stage: `IMPLEMENT`, `REVIEW`, or `VERIFY` (see Pipeline Stages below)
-- `Mode` — execution mode hint: `required <mode>` (agent must use it), `suggested <mode>` (agent may use it), or omitted (agent chooses)
+Parameters:
+- `id` (required) — unique task ID (e.g. `task-auth-flow`)
+- `title` (required) — short task title
+- `description` (required) — full task description
+- `assignee` (required) — agent name assigned to this task
+- `acceptance` (required) — array of acceptance criteria strings
+- `process` — checklist items, each with `name` and `status` (default all PENDING)
+- `files` — scoped file paths
+- `dependencies` — dependent task IDs
+- `budget` — USD budget for this task
+- `stage` — pipeline stage: IMPLEMENT, REVIEW, or VERIFY
 
 ---
 
-### 2. STATUS — Agent → Manager
+### 2. hive__task_accept — Agent acknowledges assignment
 
-Reports the current state of a task. Sent on state transitions and proactively during long-running work.
+Transitions the task from ASSIGNED to ACCEPTED.
 
 ```
-STATUS | alice | <task-id> | <status>
-Progress: 3/5 acceptance criteria passing
-Current: Writing integration tests
-ETA: ~10 minutes
+hive__task_accept({ task_id: "auth-middleware" })
 ```
-
-Valid `<status>` values:
-
-| Status | Meaning |
-|---|---|
-| `READY` | Agent is online and ready to accept work |
-| `ACCEPTED` | Agent has received TASK_ASSIGN and will begin shortly |
-| `IN_PROGRESS` | Agent is actively working on the task |
-| `BLOCKED` | Agent cannot proceed without external input |
-| `COMPLETED` | Task is finished; COMPLETE message will follow |
-| `FAILED` | Task could not be completed; branch has been pushed |
-
-Fields:
-- `Progress` — human-readable progress indicator
-- `Current` — what the agent is doing right now
-- `ETA` — estimated time to completion (optional)
 
 ---
 
-### 3. QUESTION — Agent → Manager
+### 3. hive__task_update — Agent reports progress
 
-Asks the manager a clarifying question. Agents must always include a `Default` action so they never block indefinitely.
+Updates the task phase. Enforces sequential phase ordering — cannot skip or go backward. Can also update process checklist items.
 
 ```
-QUESTION | alice | <task-id>
-Re: JWT secret configuration
-Should the JWT secret come from env var or config file? Current project uses dotenv.
-Options: A) env var  B) config file  C) both with env override
-Default: Will use option A if no response in 10 minutes
+hive__task_update({
+  task_id: "auth-middleware",
+  phase: "IN_PROGRESS",
+  reason: "Starting implementation",
+  process_updates: [
+    { name: "notepad_write_priority at ACCEPT", status: "PASS", detail: "Saved task-id + ACs" },
+    { name: "explore before coding", status: "PASS", detail: "Mapped 12 files" }
+  ]
+})
 ```
 
-Fields:
-- `Re:` — topic of the question (on the line following the header)
-- Body — the question itself, written as a paragraph
-- `Options` — lettered choices (optional but recommended)
-- `Default` — the action the agent will take if no ANSWER is received within the stated timeout
-
-Agents should continue working on other parts of the task while waiting for an answer when possible.
+Parameters:
+- `task_id` (required) — task ID to update
+- `phase` (required) — target phase (must be sequential: ASSIGNED → ACCEPTED → IN_PROGRESS → REVIEW → VERIFY → COMPLETE). Always include the current phase even when only updating process items.
+- `reason` — reason for the transition
+- `process_updates` — array of process item updates with `name`, `status`, and optional `detail`
 
 ---
 
-### 4. ANSWER — Manager → Agent
+### 4. hive__task_complete — Agent marks task done
 
-Responds to a QUESTION from an agent.
+Marks a task as COMPLETE. **Validates all process items are PASS or N/A before accepting.** If any process item is still PENDING or FAIL, the completion is rejected.
 
 ```
-ANSWER | alice | <task-id>
-Re: JWT secret configuration
-Use option C. Env var JWT_SECRET overrides config.
+hive__task_complete({
+  task_id: "auth-middleware",
+  summary: "JWT auth with login, validation, and refresh flow. 12 tests passing.",
+  process_updates: [
+    { name: "lsp_diagnostics 0 errors", status: "PASS", detail: "0 errors, 0 warnings" },
+    { name: "/code-review before COMPLETE", status: "PASS", detail: "Self-reviewed via /code-review" }
+  ]
+})
 ```
 
-Fields:
-- `Re:` — echoes the topic from the original QUESTION
-- Body — the answer, written as plainly as possible
+Parameters:
+- `task_id` (required) — task ID to complete
+- `summary` — completion summary
+- `process_updates` — final process item updates before the completion check
 
 ---
 
-### 5. COMPLETE — Agent → Manager
+### 5. hive__task_fail — Agent reports failure
 
-Reports that a task is finished and the branch is ready for integration.
+Marks a task as FAILED with a reason. The agent must push their branch before calling this.
 
 ```
-COMPLETE | alice | <task-id>
-Branch: hive/alice
-Commits: 4
-Files changed: 8
-Tests: 12 passing, 0 failing
-Summary: JWT auth middleware with login endpoint, token validation, and refresh flow.
-Ready for integration.
+hive__task_fail({
+  task_id: "auth-middleware",
+  reason: "Cannot resolve OAuth2 provider dependency conflict after 2 attempts"
+})
 ```
-
-Fields:
-- `Branch` — branch name containing the completed work
-- `Commits` — number of commits on the branch
-- `Files changed` — count of files modified
-- `Tests` — test results (if applicable)
-- `Summary` — one or two sentences describing what was done; do not exhaustively list every change
-
-Agents must push their branch before sending COMPLETE.
 
 ---
 
-### 6. HEARTBEAT — Agent → Manager
+### 6. hive__task_question — Agent asks a question
 
-Periodic liveness signal sent every 5 minutes by each active agent.
+Sends a question about a task to the manager or another agent via inbox.
 
 ```
-HEARTBEAT | alice
-Uptime: 34m | Budget: $2.10/$5.00 | Status: IN_PROGRESS | Task: auth-middleware
+hive__task_question({
+  task_id: "auth-middleware",
+  to: "monarch",
+  question: "Should JWT secret come from env var or config file?",
+  options: ["A) env var", "B) config file", "C) both with env override"],
+  default_action: "Will use option A if no answer in 10 minutes"
+})
 ```
 
-No task-id in the header. The body is a single compact line with pipe-separated fields:
-- `Uptime` — time since the agent session started
-- `Budget` — cost spent vs. budget allocated
-- `Status` — current STATUS value
-- `Task` — the task-id currently being worked on, or `idle`
+Parameters:
+- `task_id` (required) — related task ID
+- `question` (required) — the question text
+- `to` — target agent (defaults to task assignee or manager)
+- `options` — suggested options
+- `default_action` — default if no answer within timeout
 
-HEARTBEAT messages are the smallest in the protocol (~80–120 characters).
+Agents should continue working on other parts of the task while waiting for an answer.
 
 ---
 
-### 7. INTEGRATE — Manager → All
+### 7. hive__task_answer — Manager responds to a question
 
-Instructs agents to prepare for branch integration. Posted when one or more tasks are complete and ready to merge.
+Answers a question about a task.
 
 ```
-INTEGRATE | manager
-Agents: alice, bob
-Order: bob first (no deps), then alice (depends on bob)
-Target: main
+hive__task_answer({
+  task_id: "auth-middleware",
+  to: "alice",
+  answer: "Use option C. Env var JWT_SECRET overrides config."
+})
 ```
-
-Fields:
-- `Agents` — comma-separated list of agents whose branches are being integrated
-- `Order` — merge order with rationale (dependency chain)
-- `Target` — the branch being merged into (typically `main` or `develop`)
 
 ---
 
-### 8. ESCALATE — Worker or Manager → Human
+### 8. hive__task_review — Submit a review
 
-Requests a human decision. Workers send ESCALATE for task-scoped decisions; the manager sends ESCALATE for project-scoped decisions. The gateway broadcasts ESCALATE to the channel so the human can read it.
+Submits a review for a task with a verdict. Can update process items.
 
 ```
-ESCALATE | sender | task-id
-Scope: task | project
-Re: <topic>
-<question>
-Options: A) ... B) ...
-Default: Will proceed with <X> if no response in <timeout>
+hive__task_review({
+  task_id: "auth-middleware",
+  verdict: "approve",
+  comments: "Clean implementation, good test coverage. One minor nit: rename `tok` to `token` for clarity.",
+  process_updates: [
+    { name: "code review", status: "PASS", detail: "Approved with minor nit" }
+  ]
+})
 ```
 
-Fields:
-- `Scope` — `task` when the decision is within the agent's assigned work; `project` when it cuts across tasks or the whole project
-- `Re:` — topic of the escalation (on the line following the header)
-- Body — the question or decision needed, written as a paragraph
-- `Options` — lettered choices (optional but recommended)
-- `Default` — the action that will be taken if no human response is received within the stated timeout
+Parameters:
+- `task_id` (required) — task ID to review
+- `verdict` (required) — `approve`, `request-changes`, or `comment`
+- `comments` (required) — review comments
+- `process_updates` — process item updates from the review
 
-Agents must always include a `Default` so work is never blocked indefinitely.
+---
+
+### 9. hive__task_get — Query a task
+
+Returns the current state of a task contract including phase, acceptance, process checklist, and history.
+
+```
+hive__task_get({ task_id: "auth-middleware" })
+```
+
+---
+
+### 10. hive__task_list — List tasks
+
+Lists all task contracts, optionally filtered by assignee or phase.
+
+```
+hive__task_list({ assignee: "alice" })
+hive__task_list({ phase: "IN_PROGRESS" })
+hive__task_list({})  // all tasks
+```
 
 ---
 
@@ -230,33 +246,22 @@ IMPLEMENT → REVIEW → VERIFY → DONE
 
 | Stage | Purpose | Assigned To | Gate to Next |
 |---|---|---|---|
-| **IMPLEMENT** | Build the feature or fix | Engineer agents | COMPLETE with passing tests |
-| **REVIEW** | Evaluate code quality, correctness, security | Engineer agents (cross-review) | Approval with no blocking findings |
+| **IMPLEMENT** | Build the feature or fix | Engineer agents | `hive__task_complete` with passing tests |
+| **REVIEW** | Evaluate code quality, correctness, security | Engineer agents (cross-review) | `hive__task_review` with `verdict: "approve"` |
 | **VERIFY** | Prove all acceptance criteria with evidence | Engineer agents (independent verification) | All criteria verified with evidence |
 
-### Stage Field in TASK_ASSIGN
+### Stage Behavior
 
-Every TASK_ASSIGN includes a `Stage:` field. The agent uses this to understand their role:
 - `Stage: IMPLEMENT` — write code, write tests, make acceptance criteria pass
-- `Stage: REVIEW` — read and critique code, report findings (do not fix code yourself)
+- `Stage: REVIEW` — read and critique code, report findings via `hive__task_review` (do not fix code yourself)
 - `Stage: VERIFY` — run tests, check behavior, provide evidence for every criterion
-
-### Mode Field in TASK_ASSIGN
-
-The optional `Mode:` field hints at which OMC execution mode the agent should use:
-- `Mode: required /ralph` — agent **must** use `/ralph` (self-referential loop until complete)
-- `Mode: required /ultrawork` — agent **must** use `/ultrawork` (parallel fan-out)
-- `Mode: suggested /ralph` — agent **may** use `/ralph` but can choose differently
-- Omitted — agent chooses the best execution mode for the task
 
 ### Gate Failure
 
-When a gate fails (review finds blocking issues, verification fails), the manager sends an ANSWER to the responsible agent with:
+When a gate fails (review finds blocking issues, verification fails), the manager sends `hive__task_answer` to the responsible agent with:
 - Specific, actionable feedback
-- The stage to return to (e.g., `Stage: IMPLEMENT` for a fix cycle)
+- The stage to return to (e.g., re-enter IMPLEMENT for a fix cycle)
 - Updated acceptance criteria if the scope changed
-
-The agent re-enters the specified stage and works toward a new COMPLETE.
 
 ---
 
@@ -268,8 +273,8 @@ The **oracle** (product agent) is the team's single external voice. All human-fa
 
 - Human messages are routed to the oracle first (Pass 0 in the gateway).
 - The oracle gathers requirements, clarifies intent, and produces specs for the manager.
-- The manager decomposes specs into TASK_ASSIGNs — the manager never talks to humans directly.
-- Agents communicate through protocol messages (QUESTION, ESCALATE, COMPLETE) — never directly to humans in Discord.
+- The manager decomposes specs into tasks via `hive__task_create` — the manager never talks to humans directly.
+- Agents communicate through task tools (`hive__task_question`, `hive__task_complete`) — never directly to humans in Discord.
 - The oracle decides what to relay to the human and how.
 
 ### Rules
@@ -286,165 +291,110 @@ The **oracle** (product agent) is the team's single external voice. All human-fa
 
 ---
 
-## Heartbeat Protocol
+## Discord Messages (Non-Task)
 
-- Agents send a HEARTBEAT message every **5 minutes** while active.
-- The manager considers an agent **dead** after **3 missed heartbeats** (15 minutes of silence).
-- Dead agent branches are preserved in git for manual recovery or task reassignment.
-- The PID watchdog in `bin/hive launch` provides faster crash detection by polling every **30 seconds** and posting a STATUS FAILED message to Discord when an agent process exits unexpectedly.
+These messages still use Discord text format because they are not part of the task lifecycle:
 
-The two mechanisms are complementary: the PID watchdog catches clean process exits quickly; the heartbeat timeout catches hung or zombie processes.
+### HEARTBEAT — Agent → Manager
+
+Periodic liveness signal sent every 5 minutes by each active agent to their agent channel.
+
+```
+HEARTBEAT | {NAME}
+Uptime: <time> | Status: <phase> | Task: <task-id or idle>
+```
+
+The manager considers an agent **dead** after **3 missed heartbeats** (15 minutes of silence).
+
+### ESCALATE — Worker or Manager → Human
+
+Requests a human decision. Posted to Discord so the oracle can translate for the human.
+
+```
+ESCALATE | {NAME} | <task-id>
+Scope: task | project
+Re: <topic>
+<question>
+Options: A) ... B) ...
+Default: Will proceed with <X> if no response in <timeout>
+```
+
+### INTEGRATE — Manager → All
+
+Instructs agents to prepare for branch integration.
+
+```
+INTEGRATE | manager
+Agents: alice, bob
+Order: bob first (no deps), then alice
+Target: main
+```
+
+### READY Announcement
+
+Agents announce themselves on startup via Discord before any task is assigned:
+
+```
+STATUS | {NAME} | - | READY
+<personality announcement>
+```
 
 ---
 
-## Task Lifecycle
+## Task Lifecycle Flow
 
 The normal flow for a task:
 
 ```
-TASK_ASSIGN → STATUS (ACCEPTED) → STATUS (IN_PROGRESS) → COMPLETE
-                                        ↓
-                                   QUESTION → ANSWER → STATUS (IN_PROGRESS)
-                                        ↓
-                                   ESCALATE → [human response] → STATUS (IN_PROGRESS)
-                                        ↓
-                                   STATUS (BLOCKED)
-                                        ↓
-                                   STATUS (FAILED)
+hive__task_create (manager)
+    → hive__task_accept (agent)
+    → hive__task_update phase:IN_PROGRESS (agent)
+    → [work happens]
+    → hive__task_complete (agent)
+    → hive__task_review (cross-reviewer)
+    → hive__task_update phase:VERIFY (manager reassigns)
+    → hive__task_complete (verifier)
 ```
 
-State transition rules:
-- An agent sends `STATUS ACCEPTED` immediately upon receiving TASK_ASSIGN.
-- An agent sends `STATUS IN_PROGRESS` when it begins active work.
-- An agent sends `QUESTION` when it needs clarification; state remains IN_PROGRESS unless the blocker is critical.
-- An agent sends `STATUS BLOCKED` when it cannot continue until an external dependency is resolved.
-- An agent sends `STATUS FAILED` before giving up; the branch must be pushed first.
-- An agent sends `COMPLETE` when all acceptance criteria are satisfied and tests pass.
+Alternate flows:
+- Agent blocked → `hive__task_question` → `hive__task_answer` → continue
+- Agent fails → `hive__task_fail` → manager reassigns
+- Review rejects → `hive__task_answer` with feedback → agent re-implements
+- Human decision needed → ESCALATE via Discord → oracle relays
 
 ---
 
 ## Error Recovery
 
-**Agent sends FAILED:**
-The manager may reassign the task to another available agent, or decompose the task further and assign sub-tasks. The failed agent's branch is available as a reference.
+**Agent sends task_fail:**
+The manager may reassign the task to another available agent, or decompose the task further. The failed agent's branch is available as a reference.
 
 **Agent goes silent (missed heartbeats):**
-After 3 missed heartbeats the manager marks the task as available for reassignment. The branch is preserved. If the agent comes back online it should send `STATUS READY` or `STATUS IN_PROGRESS` to re-establish liveness.
-
-**Agent exceeds budget:**
-The agent sends a STATUS message flagging the budget overrun, completes the current smallest safe subtask, pushes the branch, and then sends COMPLETE or FAILED with a note about partial completion. Agents must not continue spending after exceeding their allocated budget without an explicit ANSWER authorizing more.
+After 3 missed heartbeats the manager marks the task as available for reassignment. The branch is preserved.
 
 **Branch push rule:**
-Agents must push their branch before reporting COMPLETE, BLOCKED, or FAILED. Partial work on a pushed branch is always recoverable; work that exists only in a local session is lost when the session ends.
-
----
-
-## Message Size Guidelines
-
-- All messages must stay under **1800 characters**.
-- HEARTBEAT messages are the smallest (~80–120 chars); keep them compact.
-- COMPLETE messages should summarize the work, not enumerate every changed line.
-- For TASK_ASSIGN messages with complex specifications: write the full spec to a file in the project repository (e.g. `.hive/tasks/<task-id>.md`) and reference it with a `Spec: .hive/tasks/<task-id>.md` field in the message body.
-- If a QUESTION or ANSWER needs more context than fits in one message, write the detail to a file and reference it by path.
-
----
-
-## Conversation Channels
-
-### Per-Task Channels
-
-Each TASK_ASSIGN creates a dedicated Discord text channel (`#task-{id}-{slug}`) under the Hive category. The channel isolates all communication for that task — STATUS updates, QUESTIONs, ANSWERs, and the final COMPLETE message all happen in the channel.
-
-- **Channel naming**: `task-{id}-{slug}` (e.g. `task-1-auth-middleware`)
-- **Created by**: The gateway, upon processing an outbound TASK_ASSIGN
-- **Persisted**: `state/gateway/conversation-channels.json` — survives gateway restarts
-- **Cleanup**: `hive down --clean` deletes all conversation channels
-
-### Two-Tier Participation
-
-Conversation channels track participants in two tiers:
-- **Active**: receives every message in their inbox (real-time collaboration)
-- **Observing**: gets zero inbox delivery — reads Discord history via `fetch_messages` on their own schedule
-
-The assigned agent is automatically **active**. Other agents added via `hive__add_to_channel` start as **observing** and can promote themselves to active with `hive__set_channel_tier`.
-
-### Ad-Hoc Conversation Channels
-
-Agents can create conversation channels for multi-party discussions beyond task scope using `hive__create_channel`. The creator is active; other participants start as observing. Channel naming: `conv-{timestamp}-{slug}`.
-
-### Manager View
-
-The manager receives all messages via role-based routing (Pass 1) and is never added as a conversation channel participant. The manager sees:
-- All messages in all channels via role-based routing
-- HEARTBEAT messages in agent channels
-- COMPLETE embed summaries on the dashboard
-- INTEGRATE messages
-
-### Channel Permissions
-
-The bot requires `Manage Channels` permission in the Discord server to create per-task and conversation channels.
+Agents must push their branch before calling `hive__task_complete`, `hive__task_fail`, or reporting blocked status. Partial work on a pushed branch is always recoverable.
 
 ---
 
 ## Routing Rules
 
-The gateway applies selective routing so each worker only receives messages relevant to it. This reduces noise and prevents workers from seeing tasks assigned to other agents.
+The gateway applies selective routing so each worker only receives messages relevant to it.
 
 | Message Type | Delivered To | Reason |
 |---|---|---|
-| TASK_ASSIGN | Target agent only (field 2) | Field 2 = target agent name |
-| ANSWER | Target agent only (field 2) | Field 2 = target agent name |
-| QUESTION | Manager only | Manager handles clarifications |
-| STATUS | Manager only | Manager tracks progress |
+| Task contract notifications | Target agent only | Agent is the assignee |
 | HEARTBEAT | Manager only | Manager monitors liveness |
-| COMPLETE | Manager only | Manager coordinates integration |
-| INTEGRATE | Named agents in body `Agents:` field | Only involved agents need to act |
-| ESCALATE | All workers and manager | Human decision broadcast to entire channel |
+| ESCALATE | All workers and manager | Human decision broadcast |
+| INTEGRATE | Named agents in body | Only involved agents need to act |
 | Direct @name mention | Named agent only | Explicit targeting |
-| `all-workers` / `all-agents` keyword | All workers | Broadcast override |
-| Conversation channel message | Active participants (Pass 3) | Channel membership delivery |
-| Unparsable message | All workers | Backward compatibility fallback |
-
-### Field-2 Semantics
-
-- For **TASK_ASSIGN** and **ANSWER**: field 2 is the **target** agent (the recipient), not the sender. The sender is implicitly the manager.
-- For **all other types**: field 2 is the **sender** (the agent reporting).
+| `all-workers` keyword | All workers | Broadcast override |
 
 ---
 
-## Channel Lifecycle
+## Message Size Guidelines
 
-```
-TASK_ASSIGN processed → Gateway creates #task-{id}-{slug} → Agent added as active participant
-    ↓
-Agent replies go to task channel (using chatId from inbox message)
-    ↓
-Other agents added via hive__add_to_channel (start as observing, promote when ready)
-    ↓
-COMPLETE posted in task channel + embed summary on dashboard
-    ↓
-Channel persists for reference — cleaned up by hive down --clean
-```
-
-- **Creation**: Gateway creates a text channel on TASK_ASSIGN, registers as a conversation channel with the assigned agent as active
-- **Active use**: Active participants receive every message in their inbox. Observing participants read Discord history on demand.
-- **Participation changes**: Agents promote/demote with `hive__set_channel_tier`, leave with `hive__leave_channel`
-- **Completion**: COMPLETE message stays in channel; dashboard gets an embed summary
-- **Cleanup**: `hive down --clean` deletes all conversation channels. Agent teardown removes the agent from all participant sets.
-
----
-
-## Parsing Hints
-
-These rules hold for all message types and allow robust programmatic parsing:
-
-- The **header is always the first line**.
-- Fields are **pipe-delimited** (`|`) with surrounding spaces.
-- `TYPE` is always the **first field** (uppercase alpha, underscores allowed).
-- `sender` is always the **second field** (`{agent-name}` or `manager`).
-- `task-id` is the **third field** when present (absent in HEARTBEAT and INTEGRATE; present in ESCALATE).
-- `status` is the **fourth field** when present (STATUS messages only).
-- Body lines are **key-value pairs** separated by the first `: ` on the line.
-- Lines that do not contain `: ` are continuation text belonging to the preceding key.
-- Messages from other sessions arrive as push notifications wrapped in `<channel>` tags in the session context.
-- Ignore messages where `sender` is your own session ID (you sent them).
+- Discord messages must stay under **1800 characters**.
+- HEARTBEAT messages are the smallest (~80–120 chars); keep them compact.
+- For task descriptions that exceed Discord limits, the contract JSON stores the full spec — no need to split across messages.
+- If a `hive__task_question` or `hive__task_answer` needs extensive context, write the detail to a file and reference it by path.

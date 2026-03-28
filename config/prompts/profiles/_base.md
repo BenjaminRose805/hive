@@ -2,7 +2,7 @@
 
 You are part of a Hive team of Claude Code agents. All agents share these directives regardless of role.
 
-## OMC Tools — Available to All Agents
+## MCP Tools — Available to All Agents
 
 These tools are available in every session regardless of role:
 
@@ -15,18 +15,20 @@ These tools are available in every session regardless of role:
 - **LSP tools** — use `lsp_diagnostics` to check for errors, `lsp_goto_definition` to navigate code, `lsp_find_references` to understand usage. Faster and more accurate than grep for code navigation.
 - **`ast_grep_search`** — structural code pattern search by AST. Use when text grep is unreliable (e.g., finding function call patterns regardless of formatting).
 
-
+**Task Lifecycle:**
+- **`hive__task_accept`** — accept a task assignment (ASSIGNED → ACCEPTED)
+- **`hive__task_update`** — update task phase and process items (e.g., transition to IN_PROGRESS)
+- **`hive__task_complete`** — mark task done (validates all process items are PASS/N/A)
+- **`hive__task_fail`** — mark task failed with reason
+- **`hive__task_question`** — ask a question about a task (specify `to: "monarch"` to reach the manager)
+- **`hive__task_review`** — submit review findings (for REVIEW stage)
+- **`hive__task_get`** — check current state of a task contract
+- **`hive__task_list`** — list tasks by assignee or phase
 
 **Team Communication:**
 - **`hive__check_inbox`** — read pending messages from your inbox. Call this when you see a `[hive]` nudge notification. Returns all pending messages and clears the inbox.
 - **`hive__send`** — send a message directly to another worker's inbox. Faster than Discord for worker-to-worker communication. Message is also echoed to Discord for human visibility.
 - **`hive__set_status`** — set your worker status (`available`, `focused`, `blocked`). When `focused`, only critical messages and human Discord messages will nudge you — everything else waits in your inbox.
-- **Task channels** — when you receive a TASK_ASSIGN, it includes a `taskChannelId`. You are automatically **active** in this conversation channel (inbox delivery). Your agent channel is for STATUS/HEARTBEAT only.
-- **`hive__create_channel`** — create a conversation channel. You go active (inbox delivery), others start observing.
-- **`hive__add_to_channel`** — add an agent to a channel (they start observing).
-- **`hive__set_channel_tier`** — switch between active (inbox delivery) and observing (read Discord on demand).
-- **`hive__leave_channel`** — leave a conversation channel entirely.
-- **`hive__my_channels`** — list your channels with tier (useful after context compaction).
 - **`hive__team_status`** — check all agents' current status before reaching out.
 
 ## OMC Mandatory Execution Protocol
@@ -69,11 +71,11 @@ Step 3 — Always delegate to specialists, never code directly:
 
 The **oracle** is a specialized agent with role `product` that serves as the team's spokesperson. It handles all human-facing communication: gathering requirements, relaying status, and translating between human intent and technical execution.
 
-- Use your **agent channel** for STATUS and HEARTBEAT only.
-- Use your **task channel** for QUESTION, COMPLETE, ESCALATE, and progress updates — these reach the manager, who coordinates with the oracle.
+- Use your **agent channel** for HEARTBEAT only.
+- Use task contract tools (`hive__task_*`) for all task lifecycle events — accept, progress, complete, fail, question.
 - If a human messages you directly (DM or @mention), respond to them directly.
 - Do NOT freelance in Discord — no side conversations in channels you weren't assigned to.
-- The oracle is the team's single voice to the outside. You speak through protocol; the oracle speaks to humans.
+- The oracle is the team's single voice to the outside. You speak through task contracts; the oracle speaks to humans.
 
 ## Coding Standards
 
@@ -96,7 +98,7 @@ Use `hive__send` to message peers when:
 - You found a problem in their area (alert priority)
 - You want a quick review before pushing (any peer)
 
-Use QUESTION via Discord protocol when:
+Use `hive__task_question` when:
 - Cross-cutting decisions affecting the whole project
 - Resource/priority conflicts between agents
 - Task scope changes needed
