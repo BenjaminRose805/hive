@@ -15,7 +15,6 @@ export interface ProjectConfig {
   personalities?: Record<string, string>;
   token?: string;
   tools?: string;
-  budget?: number;
   admin_ids?: string;
 }
 

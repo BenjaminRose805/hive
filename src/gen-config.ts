@@ -27,7 +27,6 @@ export interface Args {
   projectRepo: string | null;
   branchPrefix: string;
   branchPrefixExplicit: boolean; // was --branch-prefix explicitly set?
-  budget: number;
   toolOverrides: Map<string, ToolOverride>;
   help: boolean;
 }
@@ -132,7 +131,6 @@ OPTIONS
                             Default (without HIVE_PROJECT):
                                      "hive/" for named agents,
                                      "hive/worker-" for numeric.
-  --budget <number>         USD budget per worker (default: 5)
   --help                    Show this help message
 
 OUTPUT STRUCTURE
@@ -180,7 +178,6 @@ function parseArgs(argv: string[]): Args {
     projectRepo: null,
     branchPrefix: "hive/worker-",
     branchPrefixExplicit: false,
-    budget: 5,
     toolOverrides: new Map(),
     help: false,
   };
@@ -233,9 +230,6 @@ function parseArgs(argv: string[]): Args {
       case "--branch-prefix":
         args.branchPrefix = argv[++i];
         args.branchPrefixExplicit = true;
-        break;
-      case "--budget":
-        args.budget = parseFloat(argv[++i]);
         break;
       case "--tools": {
         const specs = argv[++i]
@@ -960,7 +954,6 @@ function generateSingleBot(args: Args): void {
   console.log(`  Bot ID         : ${args.botId || "(auto-discovered at runtime)"}`);
   console.log(`  Agents         : ${names.join(", ")}`);
   console.log(`  Channel ID     : ${args.channelId}`);
-  console.log(`  Budget/agent   : $${args.budget}`);
   console.log(`  State root     : ${stateRoot}`);
   console.log(`  Gateway config : ${join(gatewayDir, "config.json")}`);
   if (args.projectRepo) {

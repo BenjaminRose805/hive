@@ -63,7 +63,6 @@ interface LaunchArgs {
   personalities: Record<string, string>;
   token: string;
   tools: string;
-  budget: number;
   teardown: boolean;
   clean: boolean;
 }
@@ -82,7 +81,6 @@ function parseArgs(argv: string[]): LaunchArgs {
     personalities: {},
     token: "",
     tools: "",
-    budget: 5,
     teardown: false,
     clean: false,
   };
@@ -129,9 +127,6 @@ function parseArgs(argv: string[]): LaunchArgs {
         break;
       case "--tools":
         args.tools = argv[++i];
-        break;
-      case "--budget":
-        args.budget = parseFloat(argv[++i]);
         break;
       case "--teardown":
         args.teardown = true;
@@ -1260,7 +1255,6 @@ export async function projectUp(args: string[]): Promise<void> {
   if (project.roles) cliArgs.push("--roles", project.roles);
   if (project.token) cliArgs.push("--token", project.token);
   if (project.tools) cliArgs.push("--tools", project.tools);
-  if (project.budget != null) cliArgs.push("--budget", String(project.budget));
 
   await main(cliArgs);
 }
