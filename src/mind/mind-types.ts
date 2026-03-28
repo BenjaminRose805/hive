@@ -74,7 +74,7 @@ export interface WatchEntry {
 // Delta Files (written to pending/)
 // ---------------------------------------------------------------------------
 
-export type DeltaAction = "publish" | "update" | "retract" | "register-reader" | "register-watch";
+export type DeltaAction = "publish" | "update" | "retract" | "register-reader" | "register-watch" | "task-create" | "task-transition";
 
 export interface DeltaFile {
   agent: string;
@@ -106,6 +106,98 @@ export interface ChangelogEntry {
   version: number;
   breaking: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// Task Contract System
+// ---------------------------------------------------------------------------
+
+/** Lifecycle phases in strict sequential order */
+export const TASK_PHASES = [
+  "ASSIGNED",
+  "ACCEPTED",
+  "IN_PROGRESS",
+  "REVIEW",
+  "VERIFY",
+  "COMPLETE",
+  "FAILED",
+] as const;
+
+export type TaskPhase = (typeof TASK_PHASES)[number];
+
+/** Terminal phases — no further transitions allowed */
+export const TERMINAL_PHASES: ReadonlySet<TaskPhase> = new Set(["COMPLETE", "FAILED"]);
+
+/** Phase ordering index for enforcement */
+export const PHASE_ORDER: Record<TaskPhase, number> = {
+  ASSIGNED: 0,
+  ACCEPTED: 1,
+  IN_PROGRESS: 2,
+  REVIEW: 3,
+  VERIFY: 4,
+  COMPLETE: 5,
+  FAILED: 5, // FAILED is terminal at the same level as COMPLETE
+};
+
+/** Process item check status */
+export type ProcessItemStatus = "PASS" | "FAIL" | "N/A" | "PENDING";
+
+/** A single process check required before completion */
+export interface ProcessItem {
+  name: string;
+  status: ProcessItemStatus;
+  detail?: string;
+  updated?: string; // ISO-8601
+}
+
+/** The core task contract — source of truth for task state */
+export interface TaskContract {
+  id: string;
+  title: string;
+  description: string;
+  assignee: string;
+  phase: TaskPhase;
+  acceptance: string[]; // acceptance criteria
+  process: ProcessItem[]; // required process checks
+  files?: string[]; // scoped files
+  dependencies?: string[]; // task IDs this depends on
+  budget?: number;
+  stage?: string; // pipeline stage: IMPLEMENT, REVIEW, VERIFY
+  created: string; // ISO-8601
+  updated: string; // ISO-8601
+  history: TaskTransition[];
+}
+
+/** Record of a phase transition */
+export interface TaskTransition {
+  from: TaskPhase;
+  to: TaskPhase;
+  agent: string;
+  timestamp: string; // ISO-8601
+  reason?: string;
+}
+
+// ---------------------------------------------------------------------------
+// Task Delta Actions (for daemon processing)
+// ---------------------------------------------------------------------------
+
+export type TaskDeltaAction = "task-create" | "task-transition";
+
+export interface TaskCreateDelta {
+  action: "task-create";
+  agent: string;
+  task: Omit<TaskContract, "history" | "created" | "updated">;
+}
+
+export interface TaskTransitionDelta {
+  action: "task-transition";
+  agent: string;
+  task_id: string;
+  to_phase: TaskPhase;
+  reason?: string;
+  process_updates?: ProcessItem[];
+}
+
+export type TaskDelta = TaskCreateDelta | TaskTransitionDelta;
 
 // ---------------------------------------------------------------------------
 // Daemon PID file

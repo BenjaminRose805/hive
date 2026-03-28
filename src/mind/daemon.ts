@@ -33,8 +33,11 @@ import type {
   MindEntry,
   ReaderEntry,
   ReaderRegistry,
+  TaskContract,
+  TaskPhase,
   WatchEntry,
 } from "./mind-types";
+import { TERMINAL_PHASES } from "./mind-types";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -93,6 +96,14 @@ function gatewayInboxDir(agent: string): string {
 
 function _watchesFile(agent: string): string {
   return join(MIND_ROOT, "watches", `${agent}.json`);
+}
+
+function taskDir(): string {
+  return join(MIND_ROOT, "tasks");
+}
+
+function taskPath(id: string): string {
+  return join(taskDir(), `${id}.json`);
 }
 
 function changelogDir(): string {
@@ -601,6 +612,80 @@ async function processDelta(delta: DeltaFile): Promise<void> {
       }
       break;
     }
+
+    // -----------------------------------------------------------------
+    // Task contract deltas (AC2)
+    // -----------------------------------------------------------------
+    case "task-create": {
+      // Task was already written by inbox-relay; daemon logs it to changelog
+      const taskFile = taskPath(topic);
+      const task = readJSONFile<TaskContract>(taskFile);
+
+      if (task) {
+        appendChangelog({
+          timestamp: new Date().toISOString(),
+          agent,
+          action: "task-create" as any,
+          type: "task",
+          topic,
+          version: 1,
+          breaking: false,
+        });
+
+        // Notify the assignee if different from creator
+        if (task.assignee !== agent) {
+          await writeInboxMessage(task.assignee, {
+            from: "hive-mind",
+            type: "info",
+            priority: "alert",
+            topic: `task/${topic}`,
+            content: `New task assigned to you: "${task.title}" (${topic})`,
+          });
+          await nudgeWorker(task.assignee, "alert");
+        }
+      }
+      break;
+    }
+
+    case "task-transition": {
+      const taskFile = taskPath(topic);
+      const task = readJSONFile<TaskContract>(taskFile);
+      if (!task) break;
+
+      const transitionData = delta.content as { from?: string; to?: string; reason?: string; summary?: string; verdict?: string; comments?: string } | undefined;
+
+      appendChangelog({
+        timestamp: new Date().toISOString(),
+        agent,
+        action: "task-transition" as any,
+        type: "task",
+        topic,
+        version: task.history.length,
+        breaking: false,
+      });
+
+      // Notify manager of terminal transitions
+      const toPhase = transitionData?.to as TaskPhase | undefined;
+      if (toPhase && TERMINAL_PHASES.has(toPhase)) {
+        const managerName = resolveManagerName();
+        await writeInboxMessage(managerName, {
+          from: "hive-mind",
+          type: "info",
+          priority: "alert",
+          topic: `task/${topic}`,
+          content: `Task ${topic} transitioned to ${toPhase} by ${agent}${transitionData?.reason ? `: ${transitionData.reason}` : ""}`,
+        });
+        await nudgeWorker(managerName, "alert");
+        await pushDiscordNotification(
+          managerName,
+          `task/${topic}`,
+          task.history.length,
+          false,
+          `Task ${topic} → ${toPhase}`,
+        );
+      }
+      break;
+    }
   }
 }
 
@@ -922,6 +1007,7 @@ function ensureMindDirs(): void {
     join(MIND_ROOT, "decisions"),
     join(MIND_ROOT, "pending"),
     join(MIND_ROOT, "pending", ".failed"),
+    join(MIND_ROOT, "tasks"),
     join(MIND_ROOT, "agents"),
     join(MIND_ROOT, "readers"),
     join(MIND_ROOT, "readers", "contracts"),
