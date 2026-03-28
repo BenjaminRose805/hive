@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 /**
  * intercept-ask-user.mjs — Claude Code PreToolUse hook that blocks AskUserQuestion
- * when running as a Hive worker. Agents should use Discord for all communication,
+ * when running as a Hive worker. Agents should use task contract tools for all communication,
  * not the interactive AskUserQuestion tool.
  */
 
@@ -13,15 +13,15 @@ if (!AGENT_NAME) {
   process.exit(0)
 }
 
-// Block AskUserQuestion and redirect to Discord
+// Block AskUserQuestion and redirect to task contract tools
 const reason = [
   `BLOCKED: AskUserQuestion is disabled for Hive workers.`,
   ``,
   `You are agent "${AGENT_NAME}" running in a Hive session.`,
-  `Use Discord to communicate instead:`,
-  `  - discord__reply to post in your task channel`,
+  `Use task contract tools instead:`,
+  `  - hive__task_question to ask a blocking question (delivered to monarch)`,
   `  - hive__send to message a teammate directly`,
-  `  - Send a QUESTION via Discord protocol for blocking ambiguities`,
+  `  - hive__task_update to report progress on your current task`,
 ].join('\n')
 
 console.log(JSON.stringify({

@@ -32,9 +32,7 @@ import {
   type Message,
   Partials,
 } from "discord.js";
-import { extractAgentsList, parseBody, parseHeader } from "../src/gateway/protocol-parser.ts";
-import { shouldDeliver, shouldDeliverHumanMessage, findSpokesperson, type WorkerInfo } from "../src/gateway/selective-router.ts";
-import { MessageType } from "../src/gateway/types.ts";
+import { findSpokesperson, type WorkerInfo } from "../src/gateway/selective-router.ts";
 import type { DeltaFile } from "../src/mind/mind-types.ts";
 import { type AgentsJson, NO_WORKTREE_ROLES } from "../src/shared/agent-types.ts";
 
@@ -112,55 +110,6 @@ function checkAdmin(interaction: ChatInputCommandInteraction): boolean {
 let channelsReady = false;
 let workerChannelMap: Map<string, string> = new Map();
 // ---------------------------------------------------------------------------
-// Conversation channel membership model (two-tier: active/observing)
-// ---------------------------------------------------------------------------
-
-interface ConversationChannel {
-  name: string;
-  active: Set<string>; // inbox delivery — real-time participants
-  observing: Set<string>; // no inbox — read Discord on demand
-  taskId?: string; // links to task if created via TASK_ASSIGN
-  createdAt: string;
-  createdBy: string;
-}
-
-const conversationChannels = new Map<string, ConversationChannel>(); // channelId → metadata
-
-function getChannelIdForTask(taskId: string): string | undefined {
-  for (const [channelId, convo] of conversationChannels) {
-    if (convo.taskId === taskId) return channelId;
-  }
-  return undefined;
-}
-
-function _isChannelMember(channelId: string, workerId: string): boolean {
-  const convo = conversationChannels.get(channelId);
-  if (!convo) return false;
-  return convo.active.has(workerId) || convo.observing.has(workerId);
-}
-
-function persistConversationChannels(): void {
-  try {
-    const dir = join(STATE_DIR, "gateway");
-    mkdirSync(dir, { recursive: true });
-    const serialized: Record<string, any> = {};
-    for (const [channelId, convo] of conversationChannels) {
-      serialized[channelId] = {
-        name: convo.name,
-        active: [...convo.active],
-        observing: [...convo.observing],
-        taskId: convo.taskId,
-        createdAt: convo.createdAt,
-        createdBy: convo.createdBy,
-      };
-    }
-    const filePath = join(dir, "conversation-channels.json");
-    const tmpPath = `${filePath}.tmp`;
-    writeFileSync(tmpPath, JSON.stringify(serialized, null, 2));
-    renameSync(tmpPath, filePath);
-  } catch {}
-}
-
 const GATEWAY_CONFIG_PATH = join(STATE_DIR, "gateway", "config.json");
 const GATEWAY_CONFIG_DATA = (() => {
   try {
@@ -460,8 +409,6 @@ async function routeInbound(msg: Message, excludeSender?: string): Promise<void>
     ? (msg.channel.parentId ?? msg.channelId)
     : msg.channelId;
 
-  const parsed = parseHeader(msg.content);
-  const bodyAgents = parsed ? extractAgentsList(msg.content) : undefined;
   const targets: WorkerEntry[] = [];
   const targeted = new Set<string>();
 
@@ -483,79 +430,25 @@ async function routeInbound(msg: Message, excludeSender?: string): Promise<void>
     }
   }
 
-  // Pass 1: Channel owner + coordinator role
+  // Pass 1: Channel owner + manager receives all bot messages
   for (const worker of workers.values()) {
     if (excludeSender && worker.workerId === excludeSender) continue;
+    if (targeted.has(worker.workerId)) continue;
 
     if (worker.role === "manager") {
-      // Human messages route through spokesperson, not directly to manager
       if (isHumanMsg) continue;
-      const workerInfo: WorkerInfo = {
-        workerId: worker.workerId,
-        channelId: worker.channelId,
-        role: worker.role,
-      };
-      const decision = shouldDeliver(parsed, workerInfo, msg.content, bodyAgents);
-      if (decision.deliver) {
-        targets.push(worker);
-        targeted.add(worker.workerId);
-      }
+      targets.push(worker);
+      targeted.add(worker.workerId);
       continue;
     }
 
     if (worker.channelId === effectiveChannelId) {
-      // Channel owner — deliver without mention check
       targets.push(worker);
       targeted.add(worker.workerId);
     }
   }
 
-  // Pass 2: Cross-channel mentions (for workers not yet targeted)
-  for (const worker of workers.values()) {
-    if (targeted.has(worker.workerId)) continue;
-    if (excludeSender && worker.workerId === excludeSender) continue;
-    if (worker.role === "manager") continue;
-
-    const mentioned = await isMentioned(msg, worker.mentionPatterns, effectiveChannelId);
-    if (mentioned) {
-      // Human messages only reach non-spokesperson agents via their own channel or conversation channels
-      if (isHumanMsg && worker.role !== "product" && worker.role !== "manager") {
-        continue;
-      }
-      const workerInfo: WorkerInfo = { workerId: worker.workerId, channelId: worker.channelId };
-      const decision = shouldDeliver(parsed, workerInfo, msg.content, bodyAgents);
-      if (decision.deliver) {
-        targets.push(worker);
-        targeted.add(worker.workerId);
-      }
-    }
-  }
-
-  // Pass 3: Active conversation channel members
-  const convo = conversationChannels.get(effectiveChannelId);
-  if (convo) {
-    // Skip manager-only protocol messages — don't fan out to conversation participants
-    const managerOnlyTypes = new Set(["HEARTBEAT", "STATUS", "COMPLETE", "QUESTION"]);
-    const skipProtocol = parsed && managerOnlyTypes.has(parsed.type);
-
-    if (!skipProtocol) {
-      for (const participantId of convo.active) {
-        if (targeted.has(participantId)) continue;
-        if (excludeSender && participantId === excludeSender) continue;
-        const worker = findWorkerByBareId(participantId);
-        if (worker) {
-          targets.push(worker);
-          targeted.add(participantId);
-        } else {
-          // Stale participant — auto-prune
-          convo.active.delete(participantId);
-          persistConversationChannels();
-        }
-      }
-    }
-  }
-
-  if (targets.length === 0) return;
+if (targets.length === 0) return;
 
   // Build attachment metadata
   const attachments = [...msg.attachments.values()].map((att) => ({
@@ -573,10 +466,7 @@ async function routeInbound(msg: Message, excludeSender?: string): Promise<void>
 
   // Write message to inbox and nudge each target worker via tmux
   const deliveries = targets.map(async (worker) => {
-    // Use conversation channel ID for active members, agent's own channel for Pass 1/2
-    const isActiveMember =
-      convo?.active.has(worker.workerId) && effectiveChannelId !== worker.channelId;
-    const chatId = isActiveMember ? effectiveChannelId : worker.channelId;
+    const chatId = worker.channelId;
 
     const inboxMsg: InboxMessage = {
       chatId,
@@ -585,12 +475,6 @@ async function routeInbound(msg: Message, excludeSender?: string): Promise<void>
       ts: msg.createdAt.toISOString(),
       content,
       attachments,
-      // Inject task channel ID for TASK_ASSIGN messages
-      ...(parsed?.type === MessageType.TASK_ASSIGN &&
-      parsed.taskId &&
-      getChannelIdForTask(parsed.taskId)
-        ? { taskChannelId: getChannelIdForTask(parsed.taskId)! }
-        : {}),
     };
     writeToInbox(worker.workerId, inboxMsg);
 
@@ -795,53 +679,6 @@ async function ensureWorkerChannels(): Promise<Map<string, string>> {
 }
 
 // ---------------------------------------------------------------------------
-// Task channel helpers
-// ---------------------------------------------------------------------------
-
-async function createTaskChannel(
-  taskId: string,
-  description?: string,
-  assignedAgent?: string,
-): Promise<string> {
-  // If already exists, reuse
-  const existing = getChannelIdForTask(taskId);
-  if (existing) return existing;
-
-  // Derive slug from description
-  const slug = (description ?? "unnamed")
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "")
-    .slice(0, 60);
-  const channelName = `task-${taskId}-${slug}`.slice(0, 100);
-
-  // Get guild and category from dashboard channel
-  const dashboardCh = await client.channels.fetch(DASHBOARD_CHANNEL_ID);
-  if (!dashboardCh || !("guild" in dashboardCh))
-    throw new Error("Cannot find guild for task channel");
-  const guild = (dashboardCh as any).guild;
-  const categoryId = GATEWAY_CONFIG_DATA?.categoryId;
-
-  const ch = await guild.channels.create({
-    name: channelName,
-    type: ChannelType.GuildText,
-    ...(categoryId ? { parent: categoryId } : {}),
-  });
-
-  // Register as a conversation channel with assigned agent as active
-  conversationChannels.set(ch.id, {
-    name: channelName,
-    active: new Set(assignedAgent ? [assignedAgent] : []),
-    observing: new Set(),
-    taskId,
-    createdAt: new Date().toISOString(),
-    createdBy: "gateway",
-  });
-  persistConversationChannels();
-  return ch.id;
-}
-
-// ---------------------------------------------------------------------------
 // Slash command handlers
 // ---------------------------------------------------------------------------
 
@@ -1024,42 +861,46 @@ async function handleSlashAssign(interaction: ChatInputCommandInteraction): Prom
 
   await interaction.deferReply();
 
-  // Format as TASK_ASSIGN protocol message (pipe-delimited per config/protocol.md)
+  // Create task contract via Mind system
   const taskId = `task-${Date.now().toString(36)}`;
-  const files = interaction.options.getString("files") ?? "";
-  const taskMessage = [
-    `TASK_ASSIGN | ${agentName} | ${taskId}`,
-    `Branch: hive/${agentName}`,
-    `Files: ${files}`,
-    `Description: ${task}`,
-    `Dependencies: none`,
-  ].join("\n");
+  const contractDir = join(HIVE_ROOT, ".hive", "mind", "contracts", "task");
+  mkdirSync(contractDir, { recursive: true });
 
-  // Use worker's dedicated channel
+  const contract = {
+    task_id: taskId,
+    agent: agentName,
+    stage: "IMPLEMENT",
+    status: "created",
+    created_at: new Date().toISOString(),
+    updated_at: new Date().toISOString(),
+    description: task,
+    acceptance: [],
+    design_sources: [],
+    dependencies: [],
+    process_checklist: [],
+    completion: null,
+    review: null,
+    status_card_message_id: null,
+  };
+
+  const contractPath = join(contractDir, `${taskId}.json`);
+  writeFileSync(contractPath, JSON.stringify(contract, null, 2));
+
+  // Deliver to agent inbox
   const chatId = worker.channelId || interaction.channelId;
-
-  // Create task channel for this assignment
-  let taskChannelId: string | undefined;
-  try {
-    taskChannelId = await createTaskChannel(taskId, task, agentName);
-    // Post in task channel too
-    const taskCh = await client.channels.fetch(taskChannelId);
-    if (taskCh && "send" in taskCh) await (taskCh as any).send(taskMessage.slice(0, 1800));
-  } catch (err) {
-    process.stderr.write(`hive-gateway: task channel creation in /assign failed: ${err}\n`);
-  }
-
   const assignMsg: InboxMessage = {
     chatId,
     messageId: interaction.id,
     user: interaction.user.username,
     ts: new Date().toISOString(),
-    content: taskMessage,
+    content: `TASK_ASSIGN | ${agentName} | ${taskId}\nDescription: ${task}`,
     attachments: [],
-    ...(taskChannelId ? { taskChannelId } : {}),
   };
   writeToInbox(agentName, assignMsg);
   const ok = await nudgeViaTmux(`${worker.session}:${agentName}`);
+
+  // Update status card
+  await updateStatusCard(agentName, contract);
 
   if (ok) {
     await interaction.editReply({ content: `Task assigned to \`${agentName}\`:\n> ${task}` });
@@ -1376,11 +1217,6 @@ async function handleSlashTearDown(interaction: ChatInputCommandInteraction): Pr
     if (compositeKeyToDelete) workers.delete(compositeKeyToDelete);
 
     // Remove agent from all conversation channels (prevent ghost participants)
-    for (const convo of conversationChannels.values()) {
-      convo.active.delete(agentName);
-      convo.observing.delete(agentName);
-    }
-    persistConversationChannels();
 
     // Update agents.json
     const data = readAgentsJson();
@@ -1559,15 +1395,10 @@ async function handleDeregister(req: Request): Promise<Response> {
     for (const key of toRemove) {
       const w = workers.get(key)!;
       // Clean up related state
-      for (const convo of conversationChannels.values()) {
-        convo.active.delete(w.workerId);
-        convo.observing.delete(w.workerId);
-      }
       agentProcesses.delete(w.workerId);
       workerChannelMap.delete(w.workerId);
       workers.delete(key);
     }
-    if (toRemove.length > 0) persistConversationChannels();
     persistRegistrations();
     process.stderr.write(`hive-gateway: bulk deregistered ${toRemove.length} worker(s) for session ${session}\n`);
     return jsonOk({ removed: toRemove.length });
@@ -1585,13 +1416,8 @@ async function handleDeregister(req: Request): Promise<Response> {
 
   // Clean up related state
   if (entry) {
-    for (const convo of conversationChannels.values()) {
-      convo.active.delete(workerId);
-      convo.observing.delete(workerId);
-    }
     agentProcesses.delete(workerId);
     workerChannelMap.delete(workerId);
-    persistConversationChannels();
   }
 
   persistRegistrations();
@@ -1626,74 +1452,9 @@ async function handleSend(req: Request): Promise<Response> {
   const files = (body.files as string[] | undefined) ?? [];
   const sender = body.sender as string | undefined;
 
-  const parsed = parseHeader(text);
-
-  // Auto-register watches for dependencies listed in TASK_ASSIGN
-  if (parsed?.type === MessageType.TASK_ASSIGN && parsed.target) {
-    const body = parseBody(text);
-    const deps = body.dependencies;
-    if (deps && deps !== "none") {
-      const topics = deps
-        .split(",")
-        .map((d: string) => d.trim())
-        .filter(Boolean);
-      for (const topic of topics) {
-        autoRegisterWatch(parsed.target, topic);
-      }
-    }
-  }
-
-  // Write scope file for the target agent
-  if (parsed?.type === MessageType.TASK_ASSIGN && parsed.target && parsed.taskId) {
-    const taskBody = parseBody(text);
-    const filesField = taskBody.files;
-    if (filesField) {
-      const allowed = filesField
-        .split(",")
-        .map((f: string) => {
-          const trimmed = f.trim();
-          return trimmed.endsWith("/") ? `${trimmed}**` : trimmed;
-        })
-        .filter(Boolean);
-      writeScopeFile(parsed.target, parsed.taskId, allowed);
-    }
-  }
-
-  // Create task channel for TASK_ASSIGN
-  if (parsed?.type === MessageType.TASK_ASSIGN && parsed.target && parsed.taskId) {
-    try {
-      const taskBody = parseBody(text);
-      const taskChId = await createTaskChannel(parsed.taskId, taskBody.description, parsed.target);
-      // Also post the TASK_ASSIGN in the task channel
-      const taskCh = await client.channels.fetch(taskChId);
-      if (taskCh && "send" in taskCh) {
-        await (taskCh as any).send(text.slice(0, 1800));
-      }
-    } catch (err) {
-      process.stderr.write(`hive-gateway: task channel creation failed: ${err}\n`);
-    }
-  }
-
   // Resolve chat_id='task' to a conversation channel (formerly task channel)
-  if (chatId === "task") {
-    const taskId = body.task_id as string | undefined;
-    const resolvedChannelId = taskId ? getChannelIdForTask(taskId) : undefined;
-    if (resolvedChannelId) {
-      chatId = resolvedChannelId;
-    } else {
-      return jsonErr(`No task channel found for task_id: ${taskId}`);
-    }
-  }
 
-  // Auto-add sender as active when posting to a conversation channel (Phase 2.4)
-  if (sender) {
-    const convo = conversationChannels.get(chatId);
-    if (convo && !convo.active.has(sender)) {
-      convo.observing.delete(sender); // promote from observing if present
-      convo.active.add(sender);
-      persistConversationChannels();
-    }
-  }
+
 
   // Resolve chat_id='auto' to the target agent's channel
   const targetAgent = body.target_agent as string | undefined;
@@ -1734,91 +1495,7 @@ async function handleSend(req: Request): Promise<Response> {
     }
   }
 
-  // Cross-post key protocol messages as embeds to dashboard channel
-  if (sender && parsed && DASHBOARD_CHANNEL_ID) {
-    // Always cross-post to dashboard since workers now have their own channels
-    if (chatId !== DASHBOARD_CHANNEL_ID) {
-      const channelLink = ` <#${chatId}>`;
-      let embed: EmbedBuilder | null = null;
-
-      switch (parsed.type) {
-        case MessageType.STATUS: {
-          const status = parsed.status ?? "";
-          // Skip HEARTBEAT-like noise, only post meaningful status changes
-          if (["READY", "ACCEPTED", "IN_PROGRESS", "BLOCKED", "FAILED"].includes(status)) {
-            const colors: Record<string, number> = {
-              READY: 0x5865f2,
-              ACCEPTED: 0x57f287,
-              IN_PROGRESS: 0xfee75c,
-              BLOCKED: 0xed4245,
-              FAILED: 0xed4245,
-            };
-            embed = new EmbedBuilder()
-              .setColor(colors[status] ?? 0x5865f2)
-              .setDescription(
-                `**${parsed.sender}** → \`${status}\`${parsed.taskId ? ` (${parsed.taskId})` : ""}${channelLink}`,
-              )
-              .setTimestamp();
-          }
-          break;
-        }
-        case MessageType.COMPLETE: {
-          const parsedBody = parseBody(text);
-          embed = new EmbedBuilder()
-            .setTitle(`Task Complete: ${parsed.taskId ?? ""}`)
-            .setColor(0x57f287)
-            .addFields(
-              { name: "Agent", value: parsed.sender, inline: true },
-              { name: "Task", value: parsed.taskId ?? "-", inline: true },
-            )
-            .setTimestamp();
-          if (parsedBody.branch) {
-            embed.addFields({ name: "Branch", value: parsedBody.branch, inline: true });
-          }
-          embed.addFields({ name: "Channel", value: `<#${chatId}>` });
-          break;
-        }
-        case MessageType.QUESTION: {
-          embed = new EmbedBuilder()
-            .setColor(0xfee75c)
-            .setDescription(
-              `**${parsed.sender}** has a question${parsed.taskId ? ` (${parsed.taskId})` : ""}${channelLink}`,
-            )
-            .setTimestamp();
-          break;
-        }
-        case MessageType.ESCALATE: {
-          embed = new EmbedBuilder()
-            .setColor(0xed4245)
-            .setDescription(
-              `**${parsed.sender}** escalated${parsed.taskId ? ` (${parsed.taskId})` : ""}${channelLink}`,
-            )
-            .setTimestamp();
-          break;
-        }
-      }
-
-      if (embed) {
-        try {
-          const mainChannel = await fetchTextChannel(DASHBOARD_CHANNEL_ID);
-          if ("send" in mainChannel) {
-            await mainChannel.send({ embeds: [embed] });
-          }
-        } catch (err) {
-          process.stderr.write(`hive-gateway: failed to post embed: ${err}\n`);
-        }
-      }
-    }
-  }
-
-  // Signal to inbox-relay: skip direct inbox write if target is an active conversation member
-  // (Pass 3 will deliver the message via routeInbound when the echo triggers messageCreate)
-  const skipDirectInbox =
-    targetAgent &&
-    conversationChannels.has(chatId) &&
-    conversationChannels.get(chatId)!.active.has(targetAgent);
-
-  return jsonOk({ message_ids: sentIds, ...(skipDirectInbox ? { skip_direct_inbox: true } : {}) });
+  return jsonOk({ message_ids: sentIds });
 }
 
 async function handleReact(req: Request): Promise<Response> {
@@ -1988,232 +1665,89 @@ function handleHealth(): Response {
 }
 
 // ---------------------------------------------------------------------------
-// Conversation channel HTTP endpoints
+
+// ---------------------------------------------------------------------------
+// Status card rendering — edit a pinned message per agent with task state
 // ---------------------------------------------------------------------------
 
-async function handleCreateChannel(req: Request): Promise<Response> {
-  const body = await readJson(req);
-  const topic = body.topic as string;
-  const participants = body.participants as string[];
-  const message = body.message as string | undefined;
-  const creator = body.creator as string;
+const statusCardMessages = new Map<string, string>();
 
-  if (!topic) return jsonErr("topic required", 400);
-  if (!Array.isArray(participants) || participants.length === 0)
-    return jsonErr("participants required", 400);
-  if (!creator) return jsonErr("creator required", 400);
+function renderStatusCard(workerId: string, contract: any | null): string {
+  if (!contract) {
+    const worker = [...workers.values()].find((w) => w.workerId === workerId);
+    const status = worker?.status ?? 'unknown';
+    return `\u26AA ${workerId} | idle | ${status}\
+\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\
+Session uptime: active`;
+  }
 
-  // Validate all participant names exist in workers map
-  const allNames = [creator, ...participants];
-  for (const name of allNames) {
-    if (!findWorkerByBareId(name)) {
-      return jsonErr(`unknown worker: ${name}`, 400);
+  const phases = ['ACCEPT', 'PLAN', 'IMPLEMENT', 'SELF-VERIFY', 'PEER-REVIEW', 'PUBLISH', 'GIT'];
+  const checklist: any[] = contract.process_checklist ?? [];
+  const passCount = checklist.filter((i) => i.status === 'PASS' || i.status === 'N/A').length;
+  const totalCount = checklist.length || 1;
+  const acList: any[] = contract.acceptance ?? [];
+  const acPass = acList.filter((a) => a.status === 'PASS').length;
+  const acTotal = acList.length || 1;
+
+  let currentPhase = 'ACCEPT';
+  for (const item of checklist) {
+    if (item.status === 'PASS' || item.status === 'N/A') currentPhase = item.phase;
+  }
+
+  const statusEmoji = contract.status === 'failed' ? '\uD83D\uDD34'
+    : contract.status === 'complete_pending' ? '\uD83D\uDFE1'
+    : contract.status === 'approved' ? '\uD83D\uDFE2' : '\uD83D\uDD35';
+
+  const phaseIcons = phases.map((p) => {
+    const items = checklist.filter((i: any) => i.phase === p);
+    const allDone = items.length > 0 && items.every((i: any) => i.status === 'PASS' || i.status === 'N/A');
+    const anyActive = items.some((i: any) => i.status !== 'pending' && i.status !== 'PASS' && i.status !== 'N/A');
+    if (allDone) return '\u2713 ' + p;
+    if (anyActive) return '\u25CF ' + p;
+    return '\u25CB ' + p;
+  }).join('  ');
+
+  const bar = (n: number, t: number) => '\u2588'.repeat(Math.round((n / t) * 10)) + '\u2591'.repeat(10 - Math.round((n / t) * 10));
+
+  return `${statusEmoji} ${workerId} | Task: ${contract.task_id} | Phase: ${currentPhase}\
+\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\u2501\
+Process: ${bar(passCount, totalCount)} ${passCount}/${totalCount}\
+  ${phaseIcons}\
+ACs: ${bar(acPass, acTotal)} ${acPass}/${acTotal}\
+Last update: ${new Date(contract.updated_at).toLocaleTimeString()}`;
+}
+
+async function updateStatusCard(workerId: string, contract: any | null): Promise<void> {
+  const channelId = workerChannelMap.get(workerId);
+  if (!channelId) return;
+  const cardContent = renderStatusCard(workerId, contract);
+  const existingMsgId = statusCardMessages.get(workerId);
+  try {
+    const ch = await client.channels.fetch(channelId);
+    if (!ch || !('send' in ch)) return;
+    if (existingMsgId) {
+      try {
+        const msg = await (ch as any).messages.fetch(existingMsgId);
+        await msg.edit(cardContent);
+        return;
+      } catch { /* message gone, create new */ }
     }
+    const sent = await (ch as any).send(cardContent);
+    statusCardMessages.set(workerId, sent.id);
+    try { await sent.pin(); } catch {}
+  } catch (err) {
+    process.stderr.write(`hive-gateway: status card update failed for ${workerId}: ${err}\
+`);
   }
-
-  // Derive slug from topic
-  const slug = topic
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-|-$/g, "")
-    .slice(0, 60);
-  const channelName = `conv-${Date.now().toString(36)}-${slug}`.slice(0, 100);
-
-  // Create Discord channel under Hive category (same pattern as createTaskChannel)
-  const dashboardCh = await client.channels.fetch(DASHBOARD_CHANNEL_ID);
-  if (!dashboardCh || !("guild" in dashboardCh))
-    return jsonErr("Cannot find guild for conversation channel");
-  const guild = (dashboardCh as any).guild;
-  const categoryId = GATEWAY_CONFIG_DATA?.categoryId;
-
-  const ch = await guild.channels.create({
-    name: channelName,
-    type: ChannelType.GuildText,
-    ...(categoryId ? { parent: categoryId } : {}),
-  });
-
-  // Register in conversationChannels: creator → active, others → observing
-  const observingSet = new Set(participants.filter((p: string) => p !== creator));
-  const activeSet = new Set([creator]);
-  conversationChannels.set(ch.id, {
-    name: channelName,
-    active: activeSet,
-    observing: observingSet,
-    createdAt: new Date().toISOString(),
-    createdBy: creator,
-  });
-  persistConversationChannels();
-
-  // Write notification to each participant's inbox
-  for (const name of allNames) {
-    const notifMsg: InboxMessage = {
-      chatId: ch.id,
-      messageId: `notify-${Date.now()}-${name}`,
-      user: "system",
-      ts: new Date().toISOString(),
-      content: `You've been added to #${channelName} (topic: ${topic}). Channel ID: ${ch.id}. Use fetch_messages to read history, or hive__set_channel_tier to go active.`,
-      attachments: [],
-    };
-    writeToInbox(name, notifMsg);
-  }
-
-  // If message provided, post it in the new Discord channel
-  if (message) {
-    try {
-      await ch.send(message);
-    } catch (e) {
-      process.stderr.write(
-        `hive-gateway: failed to post initial message to ${channelName}: ${e}\n`,
-      );
-    }
-  }
-
-  // Build participant response with status info
-  const participantInfo = allNames.map((name: string) => {
-    const worker = findWorkerByBareId(name)!;
-    return {
-      name,
-      tier: activeSet.has(name) ? "active" : "observing",
-      status: worker.status,
-      statusSince: worker.statusSince,
-    };
-  });
-
-  return jsonOk({ channelId: ch.id, participants: participantInfo });
 }
 
-async function handleAddToChannel(req: Request): Promise<Response> {
+async function handleUpdateStatusCard(req: Request): Promise<Response> {
   const body = await readJson(req);
-  const channelId = body.channel_id as string;
-  const agent = body.agent as string;
-  const addedBy = body.added_by as string;
-
-  if (!channelId) return jsonErr("channel_id required", 400);
-  if (!agent) return jsonErr("agent required", 400);
-
-  const convo = conversationChannels.get(channelId);
-  if (!convo) return jsonErr(`unknown conversation channel: ${channelId}`, 404);
-
-  const worker = findWorkerByBareId(agent);
-  if (!worker) return jsonErr(`unknown worker: ${agent}`, 404);
-
-  // If already member, return early
-  if (convo.active.has(agent)) {
-    return jsonOk({ already_member: true, tier: "active" });
-  }
-  if (convo.observing.has(agent)) {
-    return jsonOk({ already_member: true, tier: "observing" });
-  }
-
-  // Add to observing
-  convo.observing.add(agent);
-  persistConversationChannels();
-
-  // Notify the agent
-  const notifMsg: InboxMessage = {
-    chatId: channelId,
-    messageId: `notify-${Date.now()}-${agent}`,
-    user: "system",
-    ts: new Date().toISOString(),
-    content: `You've been added to #${convo.name} (added by ${addedBy ?? "unknown"}). Channel ID: ${channelId}. Use fetch_messages to read history, or hive__set_channel_tier to go active.`,
-    attachments: [],
-  };
-  writeToInbox(agent, notifMsg);
-
-  // Nudge only if shouldNudge passes
-  if (shouldNudge(worker) && !shouldDebounceNudge(agent)) {
-    await nudgeViaTmux(`${worker.session}:${agent}`);
-  }
-
-  return jsonOk({
-    added: true,
-    agent,
-    tier: "observing",
-    status: worker.status,
-    statusSince: worker.statusSince,
-  });
-}
-
-async function handleSetChannelTier(req: Request): Promise<Response> {
-  const body = await readJson(req);
-  const channelId = body.channel_id as string;
-  const agent = body.agent as string;
-  const tier = body.tier as string;
-
-  if (!channelId) return jsonErr("channel_id required", 400);
-  if (!agent) return jsonErr("agent required", 400);
-  if (tier !== "active" && tier !== "observing")
-    return jsonErr("tier must be active or observing", 400);
-
-  const convo = conversationChannels.get(channelId);
-  if (!convo) return jsonErr(`unknown conversation channel: ${channelId}`, 404);
-
-  // Validate agent is a member
-  const isMember = convo.active.has(agent) || convo.observing.has(agent);
-  if (!isMember) return jsonErr(`agent ${agent} is not a member of channel ${channelId}`, 400);
-
-  // Move between sets
-  if (tier === "active") {
-    convo.observing.delete(agent);
-    convo.active.add(agent);
-  } else {
-    convo.active.delete(agent);
-    convo.observing.add(agent);
-  }
-  persistConversationChannels();
-
-  return jsonOk({ updated: true, agent, tier });
-}
-
-async function handleLeaveChannel(req: Request): Promise<Response> {
-  const body = await readJson(req);
-  const channelId = body.channel_id as string;
-  const agent = body.agent as string;
-
-  if (!channelId) return jsonErr("channel_id required", 400);
-  if (!agent) return jsonErr("agent required", 400);
-
-  const convo = conversationChannels.get(channelId);
-  if (!convo) return jsonErr(`unknown conversation channel: ${channelId}`, 404);
-
-  convo.active.delete(agent);
-  convo.observing.delete(agent);
-  persistConversationChannels();
-
-  return jsonOk({ left: true, agent });
-}
-
-function handleMyChannels(url: URL): Response {
-  const workerName = url.searchParams.get("worker");
-  if (!workerName) return jsonErr("worker query parameter required", 400);
-
-  const channels: Array<{
-    channelId: string;
-    name: string;
-    tier: string;
-    participants: { active: string[]; observing: string[] };
-    taskId?: string;
-  }> = [];
-
-  for (const [channelId, convo] of conversationChannels) {
-    let tier: string | null = null;
-    if (convo.active.has(workerName)) tier = "active";
-    else if (convo.observing.has(workerName)) tier = "observing";
-    if (!tier) continue;
-
-    channels.push({
-      channelId,
-      name: convo.name,
-      tier,
-      participants: {
-        active: [...convo.active],
-        observing: [...convo.observing],
-      },
-      ...(convo.taskId ? { taskId: convo.taskId } : {}),
-    });
-  }
-
-  return jsonOk({ channels });
+  const workerId = body.worker_id as string;
+  const contract = body.contract as any;
+  if (!workerId) return jsonErr('worker_id required', 400);
+  await updateStatusCard(workerId, contract ?? null);
+  return jsonOk({ updated: true });
 }
 
 function handleTeamStatus(): Response {
@@ -2271,11 +1805,7 @@ const server = Bun.serve({
       if (method === "POST" && path === "/status") return await handleSetStatus(req);
       if (method === "GET" && path.startsWith("/worker-status/")) return handleGetWorkerStatus(url);
       if (method === "POST" && path === "/nudge") return await handleNudge(req);
-      if (method === "POST" && path === "/create-channel") return await handleCreateChannel(req);
-      if (method === "POST" && path === "/add-to-channel") return await handleAddToChannel(req);
-      if (method === "POST" && path === "/set-channel-tier") return await handleSetChannelTier(req);
-      if (method === "POST" && path === "/leave-channel") return await handleLeaveChannel(req);
-      if (method === "GET" && path === "/my-channels") return handleMyChannels(url);
+      if (method === "POST" && path === "/update-status-card") return await handleUpdateStatusCard(req);
       if (method === "GET" && path === "/team-status") return handleTeamStatus();
       return jsonErr("not found", 404);
     } catch (err) {
@@ -2310,17 +1840,12 @@ setInterval(async () => {
       for (const key of toRemove) {
         const w = workers.get(key);
         if (w) {
-          for (const convo of conversationChannels.values()) {
-            convo.active.delete(w.workerId);
-            convo.observing.delete(w.workerId);
-          }
           agentProcesses.delete(w.workerId);
           workerChannelMap.delete(w.workerId);
         }
         workers.delete(key);
       }
       if (toRemove.length > 0) {
-        persistConversationChannels();
         process.stderr.write(
           `hive-gateway: cleaned ${toRemove.length} stale worker(s) from dead session ${session}\n`,
         );
@@ -2378,64 +1903,6 @@ client.once("ready", async (c) => {
     channelsReady = true;
     process.stderr.write(`hive-gateway: ${workerChannelMap.size} worker channels ready\n`);
 
-    // Load existing conversation channels from a previous run
-    try {
-      const ccPath = join(STATE_DIR, "gateway", "conversation-channels.json");
-      const tcPath = join(STATE_DIR, "gateway", "task-channels.json");
-
-      if (existsSync(ccPath)) {
-        // New format: channelId → { name, active[], observing[], taskId?, ... }
-        const data = JSON.parse(readFileSync(ccPath, "utf8"));
-        for (const [channelId, entry] of Object.entries(data)) {
-          const e = entry as any;
-          conversationChannels.set(channelId, {
-            name: e.name ?? "",
-            active: new Set(e.active ?? []),
-            observing: new Set(e.observing ?? []),
-            taskId: e.taskId,
-            createdAt: e.createdAt ?? new Date().toISOString(),
-            createdBy: e.createdBy ?? "unknown",
-          });
-        }
-        process.stderr.write(
-          `hive-gateway: loaded ${conversationChannels.size} conversation channel(s)\n`,
-        );
-      } else if (existsSync(tcPath)) {
-        // Migration: old format is taskId → channelId
-        const data = JSON.parse(readFileSync(tcPath, "utf8"));
-        // Try to backfill active set from agents.json task assignments
-        let agentsData: AgentsJson | null = null;
-        try {
-          agentsData = readAgentsJson();
-        } catch {}
-
-        for (const [taskId, channelId] of Object.entries(data)) {
-          const chId = channelId as string;
-          const active = new Set<string>();
-          // Best-effort: find agent assigned to this task from agents.json
-          if (agentsData) {
-            for (const agent of agentsData.agents) {
-              if (agent.status === "running") {
-                // Can't determine exact task assignment, leave active empty
-              }
-            }
-          }
-          conversationChannels.set(chId, {
-            name: `task-${taskId}`,
-            active,
-            observing: new Set(),
-            taskId,
-            createdAt: new Date().toISOString(),
-            createdBy: "migrated",
-          });
-        }
-        // Persist in new format and log migration
-        persistConversationChannels();
-        process.stderr.write(
-          `hive-gateway: migrated ${conversationChannels.size} task channel(s) to conversation channels\n`,
-        );
-      }
-    } catch {}
   } catch (err) {
     const isPermission =
       String(err).includes("Missing Permissions") || String(err).includes("50013");
