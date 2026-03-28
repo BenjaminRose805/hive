@@ -18,6 +18,7 @@ import {
   existsSync,
   mkdirSync,
   readFileSync,
+  readdirSync,
   renameSync,
   unlinkSync,
   writeFileSync,
@@ -230,19 +231,37 @@ function registerSelfSend(nonce: string, senderId: string): void {
 // Nudge helpers — status-aware suppression + per-worker debouncing
 // ---------------------------------------------------------------------------
 
-function shouldNudge(worker: WorkerEntry, priority: string = "info"): boolean {
-  if ((worker.status === "focused" || worker.status === "blocked") && priority !== "critical") {
-    return false;
-  }
+function shouldNudge(_worker: WorkerEntry, _priority: string = "normal"): boolean {
+  // AC1: Always nudge — no status-based suppression. All messages get delivered immediately.
+  // Priority (normal/critical) is sender intent metadata only, not a delivery filter.
   return true;
 }
 
 const lastNudgeTime = new Map<string, number>(); // workerId → timestamp
 const NUDGE_COOLDOWN_MS = 15_000; // 15 seconds
+const pendingDeferredNudges = new Set<string>(); // workerIds with a deferred nudge scheduled
 
 function shouldDebounceNudge(workerId: string): boolean {
   const last = lastNudgeTime.get(workerId) ?? 0;
-  if (Date.now() - last < NUDGE_COOLDOWN_MS) return true;
+  if (Date.now() - last < NUDGE_COOLDOWN_MS) {
+    // AC6: Defer the nudge instead of dropping it
+    if (!pendingDeferredNudges.has(workerId)) {
+      pendingDeferredNudges.add(workerId);
+      const remainingMs = NUDGE_COOLDOWN_MS - (Date.now() - last);
+      setTimeout(async () => {
+        pendingDeferredNudges.delete(workerId);
+        lastNudgeTime.set(workerId, Date.now());
+        const worker = [...workers.values()].find((w) => w.workerId === workerId);
+        if (worker) {
+          const ok = await nudgeViaTmux(`${worker.session}:${workerId}`);
+          process.stderr.write(
+            `hive-gateway: deferred nudge for ${workerId} ${ok ? "delivered" : "failed"}\n`,
+          );
+        }
+      }, remainingMs + 100); // +100ms buffer
+    }
+    return true;
+  }
   lastNudgeTime.set(workerId, Date.now());
   return false;
 }
@@ -285,6 +304,7 @@ interface WorkerEntry {
   failCount: number;
   status: "available" | "focused" | "blocked";
   statusSince: string;
+  lastActivity: number; // Date.now() — updated on status change, send, nudge
 }
 
 const workers = new Map<string, WorkerEntry>();
@@ -310,6 +330,7 @@ try {
         failCount: 0,
         status: "available" as const,
         statusSince: new Date().toISOString(),
+        lastActivity: Date.now(),
       });
     }
     process.stderr.write(`hive-gateway: auto-registered ${workers.size} worker(s) from config\n`);
@@ -1534,6 +1555,7 @@ async function handleRegister(req: Request): Promise<Response> {
     failCount: 0,
     status: "available" as const,
     statusSince: new Date().toISOString(),
+    lastActivity: Date.now(),
   };
 
   workers.set(compositeKey, entry);
@@ -1905,6 +1927,7 @@ async function handleSetStatus(req: Request): Promise<Response> {
 
   worker.status = status as "available" | "focused" | "blocked";
   worker.statusSince = new Date().toISOString();
+  worker.lastActivity = Date.now();
 
   process.stderr.write(`hive-gateway: ${workerId} status → ${status}\n`);
   return jsonOk();
@@ -1930,7 +1953,7 @@ function handleGetWorkerStatus(url: URL): Response {
 async function handleNudge(req: Request): Promise<Response> {
   const body = await readJson(req);
   const workerId = body.workerId as string;
-  const priority = (body.priority as string) ?? "info";
+  const priority = (body.priority as string) ?? "normal";
   const session = (body.session as string) ?? undefined;
 
   if (!workerId) return jsonErr("workerId required", 400);
@@ -1955,6 +1978,7 @@ async function handleNudge(req: Request): Promise<Response> {
   }
 
   const ok = await nudgeViaTmux(`${worker.session}:${workerId}`);
+  if (ok) worker.lastActivity = Date.now();
   return ok ? jsonOk({ nudged: true }) : jsonErr("nudge failed");
 }
 
@@ -2329,6 +2353,67 @@ setInterval(async () => {
     }
   }
 }, 5 * 60 * 1000);
+
+// ---------------------------------------------------------------------------
+// AC5: Status auto-decay — decay focused/blocked to available after 10 min inactivity
+// ---------------------------------------------------------------------------
+
+const STATUS_DECAY_MS = 10 * 60 * 1000; // 10 minutes
+
+setInterval(() => {
+  const now = Date.now();
+  for (const worker of workers.values()) {
+    if (worker.status !== "available" && now - worker.lastActivity > STATUS_DECAY_MS) {
+      process.stderr.write(
+        `hive-gateway: auto-decaying ${worker.workerId} from ${worker.status} to available (${Math.round((now - worker.lastActivity) / 60_000)}min inactive)\n`,
+      );
+      worker.status = "available";
+      worker.statusSince = new Date().toISOString();
+    }
+  }
+}, 60_000); // Check every minute
+
+// ---------------------------------------------------------------------------
+// AC4: Unread watchdog — force-nudge for messages unread >5 minutes
+// ---------------------------------------------------------------------------
+
+const UNREAD_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
+const INBOX_MESSAGES_DIR = join(INBOX_DIR, "messages");
+
+setInterval(async () => {
+  if (!existsSync(INBOX_MESSAGES_DIR)) return;
+
+  const now = Date.now();
+  for (const worker of workers.values()) {
+    const workerInbox = join(INBOX_MESSAGES_DIR, worker.workerId);
+    if (!existsSync(workerInbox)) continue;
+
+    let hasStaleMessages = false;
+    try {
+      const files = readdirSync(workerInbox).filter(
+        (f) => f.endsWith(".json") && !f.startsWith("."),
+      );
+      for (const file of files) {
+        // Extract timestamp from filename format: {timestamp}-{uuid}.json
+        const ts = parseInt(file.split("-")[0], 10);
+        if (!isNaN(ts) && now - ts > UNREAD_THRESHOLD_MS) {
+          hasStaleMessages = true;
+          break;
+        }
+      }
+    } catch {
+      continue;
+    }
+
+    if (hasStaleMessages) {
+      // Force-nudge regardless of status or debounce
+      const ok = await nudgeViaTmux(`${worker.session}:${worker.workerId}`);
+      process.stderr.write(
+        `hive-gateway: unread watchdog force-nudge for ${worker.workerId} ${ok ? "delivered" : "failed"}\n`,
+      );
+    }
+  }
+}, 60_000); // Check every minute
 
 // ---------------------------------------------------------------------------
 // Graceful shutdown

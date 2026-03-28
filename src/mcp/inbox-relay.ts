@@ -120,9 +120,9 @@ const TOOLS = [
         text: { type: "string", description: "Message text to send (max 10KB)." },
         priority: {
           type: "string",
-          enum: ["info", "alert", "response", "critical"],
+          enum: ["normal", "critical"],
           description:
-            "Message priority. info=FYI (default), alert=problem affecting them, response=answering their question, critical=must interrupt.",
+            "Message priority. normal=default (nudge may be suppressed if recipient is focused), critical=always interrupts regardless of status.",
         },
         task_id: {
           type: "string",
@@ -136,7 +136,7 @@ const TOOLS = [
   {
     name: "hive__set_status",
     description:
-      'Set your worker status. Use "available" when between tasks, "focused" when deep in work (suppresses non-critical nudges), "blocked" when waiting on something.',
+      'Set your worker status. Use "available" when between tasks, "focused" when deep in work (only critical messages nudge), "blocked" when waiting on something.',
     inputSchema: {
       type: "object" as const,
       properties: {
@@ -354,7 +354,7 @@ interface InboxMessage {
   attachments: Array<{ name: string; contentType: string; size: number; url: string }>;
   source?: string; // "direct" for worker-to-worker, "mind" for daemon notifications, absent for Discord
   mindType?: string; // Mind notification type (e.g. "mind-update", "watch-resolved", "nudge")
-  priority?: string; // Message priority ("info", "alert", "response", "critical")
+  priority?: string; // Message priority ("normal", "critical")
   topic?: string; // Mind topic reference
   taskChannelId?: string; // Task channel ID (present on TASK_ASSIGN messages)
 }
@@ -542,7 +542,9 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
     case "hive__send": {
       const to = args.to as string;
       const text = args.text as string;
-      const priority = (args.priority as string) ?? "info";
+      const rawPriority = (args.priority as string) ?? "normal";
+      // Normalize legacy 4-level priorities to 2-level: critical stays critical, everything else is normal
+      const priority = rawPriority === "critical" ? "critical" : "normal";
       const taskId = args.task_id as string | undefined;
       if (!to) throw new Error("to is required");
       if (!text) throw new Error("text is required");
@@ -584,8 +586,18 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
       writeFileSync(tmpPath, JSON.stringify(message, null, 2));
       renameSync(tmpPath, finalPath);
 
-      // Nudge target worker (best-effort)
-      await gatewayFetch("/nudge", { workerId: to, priority });
+      // Nudge target worker — capture delivery feedback
+      let nudged = false;
+      let recipientStatus = "unknown";
+      try {
+        const nudgeRes = await gatewayFetch("/nudge", { workerId: to, priority });
+        if (nudgeRes && typeof nudgeRes === "object") {
+          nudged = (nudgeRes as Record<string, unknown>).nudged === true;
+          recipientStatus = ((nudgeRes as Record<string, unknown>).reason as string) ?? (nudged ? "available" : "unknown");
+        }
+      } catch {
+        // Nudge is best-effort — message is already in inbox
+      }
 
       // SECONDARY: Echo to Discord for human visibility (best-effort)
       const echoText = `[${WORKER_ID} → ${to}] ${text}`;
@@ -594,7 +606,7 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
         : { chat_id: "auto", target_agent: to, text: echoText, sender: WORKER_ID };
       await gatewayFetch("/send", echoPayload);
 
-      return JSON.stringify({ sent: true, to, messageId: msgId });
+      return JSON.stringify({ sent: true, nudged, recipientStatus, to, messageId: msgId });
     }
     case "hive__set_status": {
       const status = args.status as string;
@@ -811,13 +823,13 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
 
       const message: InboxMessage = {
         chatId: "", messageId: msgId, user: WORKER_ID, ts: timestamp,
-        content, attachments: [], source: "direct", priority: "alert",
+        content, attachments: [], source: "direct", priority: "normal",
       };
 
       const filename = `${Date.now()}-${msgId}.json`;
       writeFileSync(join(targetDir, `.${filename}.tmp`), JSON.stringify(message, null, 2));
       renameSync(join(targetDir, `.${filename}.tmp`), join(targetDir, filename));
-      await gatewayFetch("/nudge", { workerId: to, priority: "alert" });
+      await gatewayFetch("/nudge", { workerId: to, priority: "normal" });
 
       // Echo to Discord
       await gatewayFetch("/send", {
@@ -845,13 +857,13 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
 
       const message: InboxMessage = {
         chatId: "", messageId: msgId, user: WORKER_ID, ts: timestamp,
-        content, attachments: [], source: "direct", priority: "response",
+        content, attachments: [], source: "direct", priority: "normal",
       };
 
       const filename = `${Date.now()}-${msgId}.json`;
       writeFileSync(join(targetDir, `.${filename}.tmp`), JSON.stringify(message, null, 2));
       renameSync(join(targetDir, `.${filename}.tmp`), join(targetDir, filename));
-      await gatewayFetch("/nudge", { workerId: to, priority: "response" });
+      await gatewayFetch("/nudge", { workerId: to, priority: "normal" });
 
       await gatewayFetch("/send", {
         chat_id: "task", task_id: taskId,
@@ -899,12 +911,12 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
         const content = `ANSWER | ${WORKER_ID} | ${taskId}\nRe: Review — ${taskId}\nVerdict: ${verdict}\n${comments}`;
         const message: InboxMessage = {
           chatId: "", messageId: msgId, user: WORKER_ID, ts: new Date().toISOString(),
-          content, attachments: [], source: "direct", priority: "alert",
+          content, attachments: [], source: "direct", priority: "normal",
         };
         const filename = `${Date.now()}-${msgId}.json`;
         writeFileSync(join(targetDir, `.${filename}.tmp`), JSON.stringify(message, null, 2));
         renameSync(join(targetDir, `.${filename}.tmp`), join(targetDir, filename));
-        await gatewayFetch("/nudge", { workerId: task.assignee, priority: "alert" });
+        await gatewayFetch("/nudge", { workerId: task.assignee, priority: "normal" });
       }
 
       writeDelta({

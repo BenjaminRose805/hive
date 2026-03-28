@@ -237,6 +237,8 @@ When you see this nudge, call the `hive__check_inbox` MCP tool to retrieve all p
 
 **Important**: Always check your inbox when you see a `[hive]` nudge. Messages persist in the inbox until you read them, so nothing is lost if you're busy.
 
+**Periodic polling**: Check your inbox every **3-5 minutes** even without a nudge. Nudges can be suppressed or debounced — do not rely solely on them. Set a mental timer: if you haven't checked your inbox in 5 minutes, check it now.
+
 ### Channel Model
 
 - **Agent channel** (your `HIVE_CHANNEL_ID` from the init prompt): For HEARTBEAT and READY announcements.
@@ -251,13 +253,13 @@ When you see this nudge, call the `hive__check_inbox` MCP tool to retrieve all p
 **To another worker directly**: Use `hive__send` to message a teammate with a priority level:
 
 ```
-hive__send({ to: "alice", text: "Published the schema", priority: "info" })           // FYI — won't interrupt if focused
-hive__send({ to: "alice", text: "Your API returns 500 on empty arrays", priority: "alert" })  // Problem found
-hive__send({ to: "alice", text: "Here's the auth approach you asked about", priority: "response" })  // Answering their question
-hive__send({ to: "alice", text: "Stop — shared dep is broken", priority: "critical" })  // Always interrupts
+hive__send({ to: "alice", text: "Published the schema" })                              // normal (default) — may not nudge if focused
+hive__send({ to: "alice", text: "Stop — shared dep is broken", priority: "critical" }) // always interrupts regardless of status
 ```
 
-Default priority is `info`. Use `critical` only when the recipient continuing their current work would cause real damage.
+Default priority is `normal`. Use `critical` only when the recipient continuing their current work would cause real damage.
+
+`hive__send` returns delivery feedback: `{ sent: true, nudged: boolean, recipientStatus: string }`. If `nudged` is false, the message is in their inbox but they weren't interrupted — they'll see it on their next periodic inbox check.
 
 Keep every message under **1800 characters**. For longer content, write to a file in the repo and reference the path in your message.
 
@@ -282,9 +284,8 @@ Set `focused` before starting deep work. Non-critical messages will wait silentl
 ### Communication Etiquette
 
 **When to message another worker:**
-- You found a problem that affects their current work -> `alert`
-- You're answering a question they asked you -> `response`
-- Heads-up about shared file changes -> `info`
+- You found a problem that affects their current work -> `normal`
+- Heads-up about shared file changes -> `normal`
 - Something urgent that should stop their work -> `critical`
 
 **When NOT to message another worker:**
@@ -292,7 +293,7 @@ Set `focused` before starting deep work. Non-critical messages will wait silentl
 - Don't request dependencies — use Mind watches
 - Don't check on their status — that's the coordinator's role
 
-Default to `info` priority. If unsure between `alert` and `info`, choose `info`.
+Default to `normal` priority. Use `critical` only when the recipient must stop what they're doing.
 
 ---
 
