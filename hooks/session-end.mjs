@@ -15,7 +15,7 @@
  * Always fires, with or without an active task.
  */
 
-import { readFileSync, readdirSync } from "fs";
+import { readFileSync, readdirSync, writeFileSync, existsSync } from "fs";
 import { join, dirname } from "path";
 import { request } from "http";
 
@@ -99,6 +99,51 @@ function postToDiscord(text) {
   });
 }
 
+/**
+ * Layer 2: Mark any non-terminal task contracts assigned to this agent as FAILED.
+ * This ensures the task system reflects reality even if the agent died mid-task.
+ */
+function failOrphanedTasks() {
+  const mindRoot = process.env.HIVE_MIND_ROOT
+    || (gatewaySocket ? join(dirname(dirname(gatewaySocket)), '.hive', 'mind') : '')
+  if (!mindRoot) return
+
+  const tasksDir = join(mindRoot, 'tasks')
+  if (!existsSync(tasksDir)) return
+
+  const TERMINAL_PHASES = new Set(['COMPLETE', 'FAILED'])
+  const now = new Date().toISOString()
+
+  try {
+    const files = readdirSync(tasksDir).filter(f => f.endsWith('.json') && !f.startsWith('.'))
+    for (const file of files) {
+      try {
+        const filePath = join(tasksDir, file)
+        const task = JSON.parse(readFileSync(filePath, 'utf-8'))
+        if (task.assignee === agentName && !TERMINAL_PHASES.has(task.phase)) {
+          task.history.push({
+            from: task.phase,
+            to: 'FAILED',
+            agent: agentName,
+            timestamp: now,
+            reason: 'Session terminated unexpectedly (session-end hook)',
+          })
+          task.phase = 'FAILED'
+          task.updated = now
+          writeFileSync(filePath, JSON.stringify(task, null, 2))
+          process.stderr.write(
+            `[session-end-hook] Marked task ${task.id} as FAILED (was ${task.history.at(-1).from})\n`
+          )
+        }
+      } catch {
+        // Skip unreadable task files
+      }
+    }
+  } catch {
+    // Best-effort — don't block session teardown
+  }
+}
+
 // --- Main ---
 
 async function main() {
@@ -106,6 +151,9 @@ async function main() {
   if (alreadyReported()) {
     process.exit(0);
   }
+
+  // Layer 2: Mark orphaned tasks as FAILED in the contract system
+  failOrphanedTasks()
 
   const timestamp = new Date().toISOString();
   const message = [

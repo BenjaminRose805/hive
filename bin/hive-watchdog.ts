@@ -225,6 +225,22 @@ function parseActivity(
   return null;
 }
 
+// --- File-based liveness ---
+
+const LIVENESS_DIR = join(dirname(GATEWAY_SOCKET), "liveness");
+
+function readLivenessTimestamp(agentName: string): number {
+  try {
+    const filePath = join(LIVENESS_DIR, `${agentName}.ts`);
+    if (!existsSync(filePath)) return 0;
+    const content = readFileSync(filePath, "utf-8").trim();
+    const ts = new Date(content).getTime();
+    return Number.isNaN(ts) ? 0 : ts;
+  } catch {
+    return 0;
+  }
+}
+
 // --- Main check cycle ---
 
 async function checkAgents(state: WatchdogState): Promise<void> {
@@ -242,7 +258,18 @@ async function checkAgents(state: WatchdogState): Promise<void> {
     const channelId = channels[agent.name] || agent.channelId;
     if (!channelId) continue;
 
-    // Fetch recent messages from this agent's channel
+    // Layer 3: Check file-based liveness timestamps first (preferred over Discord polling)
+    const fileTs = readLivenessTimestamp(agent.name);
+    if (fileTs > 0) {
+      const lastKnown = state.lastActivity[agent.name]
+        ? new Date(state.lastActivity[agent.name]).getTime()
+        : 0;
+      if (fileTs > lastKnown) {
+        state.lastActivity[agent.name] = new Date(fileTs).toISOString();
+      }
+    }
+
+    // Fallback: Fetch recent messages from this agent's channel
     const messages = await fetchMessages(channelId, FETCH_LIMIT);
 
     // Process messages for activity signals

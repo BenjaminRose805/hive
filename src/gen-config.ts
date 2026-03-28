@@ -929,6 +929,31 @@ function generateSingleBot(args: Args): void {
         ],
       });
 
+      // Stop hooks — agent liveness and recovery
+      if (!mergedHooks.Stop) mergedHooks.Stop = [];
+
+      // Layer 1: Block stop when agent has active (non-terminal) task contracts
+      mergedHooks.Stop.push({
+        matcher: "",
+        hooks: [
+          {
+            type: "command",
+            command: `node "${join(HIVE_ROOT, "hooks", "keep-working.mjs")}"`,
+          },
+        ],
+      });
+
+      // Layer 2: Session-end safety net — mark orphaned tasks FAILED on true session death
+      mergedHooks.Stop.push({
+        matcher: "",
+        hooks: [
+          {
+            type: "command",
+            command: `node "${join(HIVE_ROOT, "hooks", "session-end.mjs")}"`,
+          },
+        ],
+      });
+
       const workerSettings = { hooks: mergedHooks };
       writeFileSync(join(workerDir, "settings.json"), JSON.stringify(workerSettings, null, 2));
       console.log(`  CREATE  state/workers/${name}/settings.json`);
