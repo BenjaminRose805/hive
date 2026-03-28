@@ -13,15 +13,15 @@ if (!AGENT_NAME) {
   process.exit(0)
 }
 
-// Block AskUserQuestion and redirect to Discord
+// Block AskUserQuestion and redirect to task contract tools
 const reason = [
   `BLOCKED: AskUserQuestion is disabled for Hive workers.`,
   ``,
   `You are agent "${AGENT_NAME}" running in a Hive session.`,
-  `Use Discord to communicate instead:`,
-  `  - discord__reply to post in your task channel`,
+  `Use task contract tools to communicate instead:`,
+  `  - hive__task_question to ask a blocking question about your task`,
   `  - hive__send to message a teammate directly`,
-  `  - Send a QUESTION via Discord protocol for blocking ambiguities`,
+  `  - discord__reply to post in your agent channel (if available)`,
 ].join('\n')
 
 console.log(JSON.stringify({
