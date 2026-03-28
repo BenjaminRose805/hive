@@ -794,9 +794,7 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
       const defaultAction = args.default_action as string | undefined;
       if (!taskId || !question) throw new Error("task_id and question are required");
 
-      const task = readTask(taskId);
-      const to = (args.to as string) || task?.assignee;
-      if (!to) throw new Error("to is required (no task found to infer assignee)");
+      const to = (args.to as string) || "monarch";
 
       if (!INBOX_ROOT) throw new Error("HIVE_INBOX_ROOT not configured");
 
@@ -870,6 +868,13 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
 
       const task = readTask(taskId);
       if (!task) throw new Error(`Task ${taskId} not found`);
+
+      // Guard: task must be at least IN_PROGRESS before review is allowed
+      if (PHASE_ORDER[task.phase] < PHASE_ORDER["IN_PROGRESS"]) {
+        throw new Error(
+          `Cannot review task ${taskId} — task is in ${task.phase} phase (must be at least IN_PROGRESS)`
+        );
+      }
 
       // Transition to REVIEW if currently in IN_PROGRESS
       if (task.phase === "IN_PROGRESS") {
