@@ -918,6 +918,18 @@ function generateSingleBot(args: Args): void {
         ],
       });
 
+      // AC7: PostToolUse inbox polling — check for unread messages after every tool call
+      if (!mergedHooks.PostToolUse) mergedHooks.PostToolUse = [];
+      mergedHooks.PostToolUse.push({
+        matcher: "",
+        hooks: [
+          {
+            type: "command",
+            command: `node "${join(HIVE_ROOT, "hooks", "check-inbox.mjs")}"`,
+          },
+        ],
+      });
+
       const workerSettings = { hooks: mergedHooks };
       writeFileSync(join(workerDir, "settings.json"), JSON.stringify(workerSettings, null, 2));
       console.log(`  CREATE  state/workers/${name}/settings.json`);
