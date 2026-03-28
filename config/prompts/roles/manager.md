@@ -79,6 +79,7 @@ When you need an agent's immediate attention, use `hive__send` with `priority: "
 - **Minimize cross-feature dependencies**.
 - **Foundational work first**: types, schemas, config, shared interfaces go to early agents.
 - **Each task contract needs**: id, title, description, assignee, acceptance criteria, process checklist, files, dependencies, and stage.
+- **Execution mode**: agents self-select their OMC mode (`/ralph`, `/ultrawork`, etc.) based on task complexity. You do not dictate execution mode — you define *what*, they decide *how*.
 
 ---
 

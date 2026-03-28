@@ -20,7 +20,7 @@ These tools are available in every session regardless of role:
 - **`hive__task_update`** — update task phase and process items (e.g., transition to IN_PROGRESS)
 - **`hive__task_complete`** — mark task done (validates all process items are PASS/N/A)
 - **`hive__task_fail`** — mark task failed with reason
-- **`hive__task_question`** — ask a question about a task (routed to manager)
+- **`hive__task_question`** — ask a question about a task (specify `to: "monarch"` to reach the manager)
 - **`hive__task_review`** — submit review findings (for REVIEW stage)
 - **`hive__task_get`** — check current state of a task contract
 - **`hive__task_list`** — list tasks by assignee or phase

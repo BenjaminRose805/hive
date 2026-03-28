@@ -105,7 +105,7 @@ hive__task_update({
 
 Parameters:
 - `task_id` (required) — task ID to update
-- `phase` (required) — target phase (must be sequential: ASSIGNED → ACCEPTED → IN_PROGRESS → REVIEW → VERIFY → COMPLETE)
+- `phase` (required) — target phase (must be sequential: ASSIGNED → ACCEPTED → IN_PROGRESS → REVIEW → VERIFY → COMPLETE). Always include the current phase even when only updating process items.
 - `reason` — reason for the transition
 - `process_updates` — array of process item updates with `name`, `status`, and optional `detail`
 
@@ -153,6 +153,7 @@ Sends a question about a task to the manager or another agent via inbox.
 ```
 hive__task_question({
   task_id: "auth-middleware",
+  to: "monarch",
   question: "Should JWT secret come from env var or config file?",
   options: ["A) env var", "B) config file", "C) both with env override"],
   default_action: "Will use option A if no answer in 10 minutes"
