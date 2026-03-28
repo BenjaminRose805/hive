@@ -593,7 +593,9 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
         const nudgeRes = await gatewayFetch("/nudge", { workerId: to, priority });
         if (nudgeRes && typeof nudgeRes === "object") {
           nudged = (nudgeRes as Record<string, unknown>).nudged === true;
-          recipientStatus = ((nudgeRes as Record<string, unknown>).reason as string) ?? (nudged ? "available" : "unknown");
+          recipientStatus = ((nudgeRes as Record<string, unknown>).status as string)
+            ?? ((nudgeRes as Record<string, unknown>).reason as string)
+            ?? (nudged ? "available" : "unknown");
         }
       } catch {
         // Nudge is best-effort — message is already in inbox

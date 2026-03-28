@@ -242,12 +242,14 @@ const NUDGE_COOLDOWN_MS = 15_000; // 15 seconds
 const pendingDeferredNudges = new Set<string>(); // workerIds with a deferred nudge scheduled
 
 function shouldDebounceNudge(workerId: string): boolean {
+  const now = Date.now();
   const last = lastNudgeTime.get(workerId) ?? 0;
-  if (Date.now() - last < NUDGE_COOLDOWN_MS) {
+  const elapsed = now - last;
+  if (elapsed < NUDGE_COOLDOWN_MS) {
     // AC6: Defer the nudge instead of dropping it
     if (!pendingDeferredNudges.has(workerId)) {
       pendingDeferredNudges.add(workerId);
-      const remainingMs = NUDGE_COOLDOWN_MS - (Date.now() - last);
+      const remainingMs = NUDGE_COOLDOWN_MS - elapsed;
       setTimeout(async () => {
         pendingDeferredNudges.delete(workerId);
         lastNudgeTime.set(workerId, Date.now());
@@ -262,7 +264,7 @@ function shouldDebounceNudge(workerId: string): boolean {
     }
     return true;
   }
-  lastNudgeTime.set(workerId, Date.now());
+  lastNudgeTime.set(workerId, now);
   return false;
 }
 
@@ -1979,7 +1981,7 @@ async function handleNudge(req: Request): Promise<Response> {
 
   const ok = await nudgeViaTmux(`${worker.session}:${workerId}`);
   if (ok) worker.lastActivity = Date.now();
-  return ok ? jsonOk({ nudged: true }) : jsonErr("nudge failed");
+  return ok ? jsonOk({ nudged: true, status: worker.status }) : jsonErr("nudge failed");
 }
 
 function handleHealth(): Response {
@@ -2369,6 +2371,7 @@ setInterval(() => {
       );
       worker.status = "available";
       worker.statusSince = new Date().toISOString();
+      worker.lastActivity = now;
     }
   }
 }, 60_000); // Check every minute
@@ -2379,6 +2382,8 @@ setInterval(() => {
 
 const UNREAD_THRESHOLD_MS = 5 * 60 * 1000; // 5 minutes
 const INBOX_MESSAGES_DIR = join(INBOX_DIR, "messages");
+const lastWatchdogNudge = new Map<string, number>(); // per-worker cooldown
+const WATCHDOG_NUDGE_COOLDOWN_MS = 5 * 60 * 1000; // Don't re-nudge the same worker more than once per 5 min
 
 setInterval(async () => {
   if (!existsSync(INBOX_MESSAGES_DIR)) return;
@@ -2406,7 +2411,11 @@ setInterval(async () => {
     }
 
     if (hasStaleMessages) {
-      // Force-nudge regardless of status or debounce
+      // Throttle watchdog nudges per worker to avoid spam on dead sessions
+      const lastWd = lastWatchdogNudge.get(worker.workerId) ?? 0;
+      if (now - lastWd < WATCHDOG_NUDGE_COOLDOWN_MS) continue;
+      lastWatchdogNudge.set(worker.workerId, now);
+
       const ok = await nudgeViaTmux(`${worker.session}:${worker.workerId}`);
       process.stderr.write(
         `hive-gateway: unread watchdog force-nudge for ${worker.workerId} ${ok ? "delivered" : "failed"}\n`,
