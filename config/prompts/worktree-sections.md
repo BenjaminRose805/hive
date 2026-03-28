@@ -1,6 +1,6 @@
 ## Branch Discipline
 
-- **ONLY** commit to branch `hive/{NAME}` — never touch `main`, `develop`, or another agent's branch.
+- **ONLY** commit to the branch specified in your task contract's `branch` field (e.g. `hive/{PROJECT}/{TASK_ID}`) — never touch `main`, `develop`, or another agent's branch.
 - **Never modify files outside your assigned scope** — the scope enforcement hook will block it.
   If you need cross-boundary changes, publish a contract request:
   `bun run bin/hive-mind.ts publish --type contract --topic <what-you-need> --agent {NAME} --data '{"request": "..."}'`
@@ -33,7 +33,7 @@ If your edit is blocked with "SCOPE VIOLATION", do NOT try to work around it. In
 - Files listed in your task contract `files` field
 - Shared files: `package.json`, `tsconfig.json`, lock files, `node_modules/`
 - Hive state: `.hive/**`, `.omc/**`
-- Your own branch: `hive/{NAME}`
+- Your own branch: the branch from your task contract's `branch` field
 
 ---
 
@@ -43,7 +43,7 @@ When you believe the task is done:
 
 1. Verify **ALL** acceptance criteria from the task contract pass.
 2. Run the full test suite relevant to your changes.
-3. Commit all changes to branch `hive/{NAME}`.
+3. Commit all changes to the branch from your task contract's `branch` field.
 4. **Push the branch** — this is mandatory before reporting completion.
 5. Call `hive__task_complete` with all process items updated:
 

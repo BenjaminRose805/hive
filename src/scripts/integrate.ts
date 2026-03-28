@@ -48,7 +48,6 @@ export function parseArgs(argv: string[]): Args {
           "Usage: integrate.ts --repo PATH --workers LIST [--target BRANCH] [--test-cmd CMD] [--dry-run] [--auto-resolve]",
         );
         process.exit(0);
-        break;
       default:
         console.error(`ERROR: Unknown option: ${argv[i]}`);
         console.error("Run with --help for usage.");
@@ -78,9 +77,14 @@ export function parseArgs(argv: string[]): Args {
   return { repo, workers, target, testCmd, dryRun, autoResolve };
 }
 
+/** Resolve branch name: if worker contains '/', treat as full branch name; otherwise prefix with 'hive/' */
+function resolveBranch(worker: string): string {
+  return worker.includes("/") ? worker : `hive/${worker}`;
+}
+
 export async function dryRun(repo: string, workers: string[], target: string): Promise<void> {
   for (const worker of workers) {
-    const branch = `hive/${worker}`;
+    const branch = resolveBranch(worker);
 
     const existsResult = run(["git", "rev-parse", "--verify", `refs/heads/${branch}`], {
       cwd: repo,
@@ -129,7 +133,7 @@ export async function integrate(
 
   // 3. Merge each worker
   for (const worker of workers) {
-    const branch = `hive/${worker}`;
+    const branch = resolveBranch(worker);
 
     const mergeResult = run(
       ["git", "merge", "--no-ff", branch, "-m", `hive: integrate ${worker}`],

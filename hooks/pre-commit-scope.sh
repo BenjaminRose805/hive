@@ -8,6 +8,15 @@ if [[ -z "$AGENT_NAME" ]]; then exit 0; fi
 HIVE_ROOT="${HIVE_ROOT:-}"
 if [[ -z "$HIVE_ROOT" ]]; then exit 0; fi
 
+# Override HIVE_ROOT from active-worktree state file if available
+STATE_FILE="${HIVE_ROOT:-.}/.hive/active-worktree/${AGENT_NAME}.json"
+if [[ -f "$STATE_FILE" ]]; then
+  WORKTREE_PATH=$(node -e "console.log(JSON.parse(require('fs').readFileSync('$STATE_FILE','utf-8')).worktreePath||'')" 2>/dev/null)
+  if [[ -n "$WORKTREE_PATH" ]]; then
+    HIVE_ROOT="$WORKTREE_PATH"
+  fi
+fi
+
 SCOPE_FILE="$HIVE_ROOT/.hive/scope/${AGENT_NAME}.json"
 if [[ ! -f "$SCOPE_FILE" ]]; then exit 0; fi
 

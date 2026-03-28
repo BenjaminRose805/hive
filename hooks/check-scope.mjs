@@ -44,7 +44,18 @@ function globToRegex(pattern) {
 
 // --- Config ---
 const AGENT_NAME = process.env.HIVE_WORKER_ID || ''
-const HIVE_ROOT = process.env.HIVE_ROOT || ''
+let HIVE_ROOT = process.env.HIVE_ROOT || ''
+
+// Per-story worktree: override HIVE_ROOT from active-worktree state file
+if (AGENT_NAME) {
+  try {
+    const stateFile = resolve(HIVE_ROOT || process.cwd(), '.hive', 'active-worktree', `${AGENT_NAME}.json`)
+    const state = JSON.parse(readFileSync(stateFile, 'utf-8'))
+    if (state.worktreePath) {
+      HIVE_ROOT = state.worktreePath
+    }
+  } catch { /* State file may not exist yet — fall back to env var */ }
+}
 
 // No agent or hive root = no enforcement
 if (!AGENT_NAME || !HIVE_ROOT) {
