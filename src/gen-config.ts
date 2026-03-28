@@ -604,7 +604,8 @@ export function buildRelayMcpConfig(
   agentRole?: string,
 ): McpConfigJson {
   const gw = gatewaySocket ?? process.env.HIVE_GATEWAY_SOCKET ?? "/tmp/hive-gateway/gateway.sock";
-  const mindRoot = join(dirname(dirname(gw)), ".hive", "mind");
+  const projectRoot = process.env.HIVE_PROJECT_DIR ?? process.cwd();
+  const mindRoot = join(projectRoot, ".hive", "mind");
 
   const servers: Record<string, McpServerEntry> = {
     // Global MCP servers (e.g. OMC tools) go first so hive-specific ones take precedence
