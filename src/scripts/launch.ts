@@ -1008,6 +1008,7 @@ function generateConfigs(names: string[], roles: Map<string, string>, args: Laun
         roleTools,
         getMasterSocket(),
         globalSettings.mcpServers,
+        role,
       ),
     );
 
@@ -1166,6 +1167,7 @@ async function launchHive(args: LaunchArgs): Promise<void> {
           roleTools,
           getMasterSocket(),
           loadGlobalSettings().mcpServers,
+          role,
         ),
       );
     }
