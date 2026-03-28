@@ -231,7 +231,7 @@ function registerSelfSend(nonce: string, senderId: string): void {
 // ---------------------------------------------------------------------------
 
 function shouldNudge(worker: WorkerEntry, priority: string = "info"): boolean {
-  if ((worker.status === "focused" || worker.status === "blocked") && priority !== "critical") {
+  if (worker.status === "focused" && priority !== "critical") {
     return false;
   }
   return true;
