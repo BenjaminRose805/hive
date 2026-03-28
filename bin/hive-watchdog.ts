@@ -90,7 +90,6 @@ function gatewayRequest(
         ? { "Content-Type": "application/json", "X-Worker-Id": "watchdog" }
         : { "X-Worker-Id": "watchdog" },
       body: payload,
-      // @ts-expect-error Bun-specific unix socket option
       unix: GATEWAY_SOCKET,
     })
       .then((res) => res.text())
