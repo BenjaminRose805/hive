@@ -1,3 +1,9 @@
+## Worktree Activation
+
+After calling `hive__task_accept`, the response includes `worktree_path` and `branch` fields. You **MUST** immediately `cd` to the `worktree_path` directory before doing any file operations. This is your isolated working directory for the task. All reads, writes, and git operations should happen within this directory.
+
+---
+
 ## Branch Discipline
 
 - **ONLY** commit to the branch specified in your task contract's `branch` field (e.g. `hive/{PROJECT}/{TASK_ID}`) — never touch `main`, `develop`, or another agent's branch.

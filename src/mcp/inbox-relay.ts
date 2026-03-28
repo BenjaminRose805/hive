@@ -21,7 +21,6 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { execSync } from "node:child_process";
 import { join, resolve } from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
@@ -55,6 +54,17 @@ const PROCESSED_TTL_MS = 5 * 60 * 1000; // 5 minutes
 
 function sanitizeTaskId(id: string): string {
   return id.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+}
+
+/** Run a git command asynchronously — non-blocking for the MCP server */
+async function gitExec(args: string[], cwd: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  const exitCode = await proc.exited;
+  return { exitCode, stdout: stdout.trim(), stderr: stderr.trim() };
 }
 
 const TASK_PHASES = [
@@ -697,24 +707,17 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
           try { unlinkSync(lockFile); } catch { /* best-effort */ }
         }
       } else {
-        // Create new worktree
-        let branchExists = false;
-        try {
-          execSync(`git -C "${projectRoot}" rev-parse --verify "${branch}"`, { stdio: "pipe" });
-          branchExists = true;
-        } catch {
-          branchExists = false;
-        }
+        // Create new worktree (async to avoid blocking MCP server)
+        const revParse = await gitExec(["-C", projectRoot, "rev-parse", "--verify", branch], projectRoot);
+        const branchExists = revParse.exitCode === 0;
 
-        try {
-          if (branchExists) {
-            execSync(`git -C "${projectRoot}" worktree add "${wtPath}" "${branch}"`, { stdio: "pipe" });
-          } else {
-            execSync(`git -C "${projectRoot}" worktree add -b "${branch}" "${wtPath}"`, { stdio: "pipe" });
-          }
-        } catch (err: unknown) {
-          const msg = err instanceof Error ? err.message : String(err);
-          process.stderr.write(`inbox-relay: Failed to create worktree ${wtPath}: ${msg}\n`);
+        const wtArgs = branchExists
+          ? ["-C", projectRoot, "worktree", "add", wtPath, branch]
+          : ["-C", projectRoot, "worktree", "add", "-b", branch, wtPath];
+
+        const result = await gitExec(wtArgs, projectRoot);
+        if (result.exitCode !== 0) {
+          process.stderr.write(`inbox-relay: Failed to create worktree ${wtPath}: ${result.stderr}\n`);
         }
       }
 
