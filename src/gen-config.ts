@@ -601,48 +601,42 @@ export function buildRelayMcpConfig(
   roleTools?: Record<string, McpServerEntry>,
   gatewaySocket?: string,
   globalMcpServers?: Record<string, McpServerEntry>,
+  agentRole?: string,
 ): McpConfigJson {
-  return {
-    mcpServers: {
-      // Global MCP servers (e.g. OMC tools) go first so hive-specific ones take precedence
-      ...(globalMcpServers ?? {}),
-      discord: {
-        command: "bun",
-        args: ["run", DISCORD_RELAY_PATH],
-        env: {
-          HIVE_GATEWAY_SOCKET:
-            gatewaySocket ?? process.env.HIVE_GATEWAY_SOCKET ?? "/tmp/hive-gateway/gateway.sock",
-          HIVE_WORKER_ID: workerId,
-          HIVE_CHANNEL_ID: channelId,
-        },
+  const gw = gatewaySocket ?? process.env.HIVE_GATEWAY_SOCKET ?? "/tmp/hive-gateway/gateway.sock";
+  const mindRoot = join(dirname(dirname(gw)), ".hive", "mind");
+
+  const servers: Record<string, McpServerEntry> = {
+    // Global MCP servers (e.g. OMC tools) go first so hive-specific ones take precedence
+    ...(globalMcpServers ?? {}),
+    inbox: {
+      command: "bun",
+      args: ["run", INBOX_RELAY_PATH],
+      env: {
+        HIVE_INBOX_DIR: join(dirname(gw), "inbox", "messages", workerId),
+        HIVE_INBOX_ROOT: join(dirname(gw), "inbox", "messages"),
+        HIVE_WORKER_ID: workerId,
+        HIVE_GATEWAY_SOCKET: gw,
+        HIVE_MIND_ROOT: mindRoot,
       },
-      inbox: {
-        command: "bun",
-        args: ["run", INBOX_RELAY_PATH],
-        env: {
-          HIVE_INBOX_DIR: join(
-            dirname(
-              gatewaySocket ?? process.env.HIVE_GATEWAY_SOCKET ?? "/tmp/hive-gateway/gateway.sock",
-            ),
-            "inbox",
-            "messages",
-            workerId,
-          ),
-          HIVE_INBOX_ROOT: join(
-            dirname(
-              gatewaySocket ?? process.env.HIVE_GATEWAY_SOCKET ?? "/tmp/hive-gateway/gateway.sock",
-            ),
-            "inbox",
-            "messages",
-          ),
-          HIVE_WORKER_ID: workerId,
-          HIVE_GATEWAY_SOCKET:
-            gatewaySocket ?? process.env.HIVE_GATEWAY_SOCKET ?? "/tmp/hive-gateway/gateway.sock",
-        },
-      },
-      ...(roleTools ?? {}),
     },
+    ...(roleTools ?? {}),
   };
+
+  // AC8: Discord relay is Oracle-only (product role)
+  if (agentRole === "product") {
+    servers.discord = {
+      command: "bun",
+      args: ["run", DISCORD_RELAY_PATH],
+      env: {
+        HIVE_GATEWAY_SOCKET: gw,
+        HIVE_WORKER_ID: workerId,
+        HIVE_CHANNEL_ID: channelId,
+      },
+    };
+  }
+
+  return { mcpServers: servers };
 }
 
 // ---------------------------------------------------------------------------
@@ -864,6 +858,7 @@ function generateSingleBot(args: Args): void {
         roleTools,
         undefined,
         globalSettings.mcpServers,
+        agentRole,
       ),
     );
 
