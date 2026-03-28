@@ -121,8 +121,9 @@ function failOrphanedTasks() {
         const filePath = join(tasksDir, file)
         const task = JSON.parse(readFileSync(filePath, 'utf-8'))
         if (task.assignee === agentName && !TERMINAL_PHASES.has(task.phase)) {
+          const previousPhase = task.phase
           task.history.push({
-            from: task.phase,
+            from: previousPhase,
             to: 'FAILED',
             agent: agentName,
             timestamp: now,
@@ -132,7 +133,7 @@ function failOrphanedTasks() {
           task.updated = now
           writeFileSync(filePath, JSON.stringify(task, null, 2))
           process.stderr.write(
-            `[session-end-hook] Marked task ${task.id} as FAILED (was ${task.history.at(-1).from})\n`
+            `[session-end-hook] Marked task ${task.id} as FAILED (was ${previousPhase})\n`
           )
         }
       } catch {

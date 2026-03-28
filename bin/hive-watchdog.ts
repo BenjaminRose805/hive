@@ -231,7 +231,7 @@ const LIVENESS_DIR = join(dirname(GATEWAY_SOCKET), "liveness");
 
 function readLivenessTimestamp(agentName: string): number {
   try {
-    const filePath = join(LIVENESS_DIR, `${agentName}.ts`);
+    const filePath = join(LIVENESS_DIR, `${agentName}.txt`);
     if (!existsSync(filePath)) return 0;
     const content = readFileSync(filePath, "utf-8").trim();
     const ts = new Date(content).getTime();

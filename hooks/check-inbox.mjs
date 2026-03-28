@@ -25,7 +25,7 @@ if (!WORKER_ID) {
 const livenessDir = join(GATEWAY_DIR, 'liveness')
 try {
   mkdirSync(livenessDir, { recursive: true })
-  writeFileSync(join(livenessDir, `${WORKER_ID}.ts`), new Date().toISOString())
+  writeFileSync(join(livenessDir, `${WORKER_ID}.txt`), new Date().toISOString())
 } catch {
   // Best-effort — don't block tool execution on liveness errors
 }
