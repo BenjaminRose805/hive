@@ -1041,6 +1041,65 @@ function generateConfigs(names: string[], roles: Map<string, string>, args: Laun
         ],
       });
 
+      // Block AskUserQuestion — agents must use Discord instead
+      mergedHooks.PreToolUse.push({
+        matcher: "AskUserQuestion",
+        hooks: [
+          {
+            type: "command",
+            command: `node "${join(HIVE_DIR, "hooks", "intercept-ask-user.mjs")}"`,
+          },
+        ],
+      });
+
+      // OMC mode enforcement hook (Write|Edit only)
+      mergedHooks.PreToolUse.push({
+        matcher: "Write|Edit",
+        hooks: [
+          {
+            type: "command",
+            command: `node "${join(HIVE_DIR, "hooks", "enforce-omc-mode.mjs")}"`,
+          },
+        ],
+      });
+
+      // PostToolUse inbox polling — check for unread messages after every tool call
+      if (!mergedHooks.PostToolUse) mergedHooks.PostToolUse = [];
+      mergedHooks.PostToolUse.push({
+        matcher: "",
+        hooks: [
+          {
+            type: "command",
+            command: `node "${join(HIVE_DIR, "hooks", "check-inbox.mjs")}"`,
+          },
+        ],
+      });
+
+      // Stop hooks — agent liveness and recovery
+      if (!mergedHooks.Stop) mergedHooks.Stop = [];
+
+      // Layer 1: Block stop when agent has active (non-terminal) task contracts
+      mergedHooks.Stop.push({
+        matcher: "",
+        hooks: [
+          {
+            type: "command",
+            command: `node "${join(HIVE_DIR, "hooks", "keep-working.mjs")}"`,
+          },
+        ],
+      });
+
+      // Layer 2: Session-end safety net — mark orphaned tasks FAILED on true session death
+      mergedHooks.Stop.push({
+        matcher: "",
+        hooks: [
+          {
+            type: "command",
+            command: `node "${join(HIVE_DIR, "hooks", "session-end.mjs")}"`,
+          },
+        ],
+      });
+
       writeJson(join(workerDir, "settings.json"), { hooks: mergedHooks });
     }
   }
