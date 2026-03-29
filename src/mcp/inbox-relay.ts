@@ -706,6 +706,14 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
         throw new Error(`phase must be one of: ${TASK_PHASES.join(", ")}`);
       }
 
+      // Block terminal phases — force use of task_complete / task_fail
+      if (TERMINAL_PHASES.has(targetPhase)) {
+        throw new Error(
+          `Cannot transition to ${targetPhase} via task_update. ` +
+          `Use hive__task_complete or hive__task_fail instead.`
+        );
+      }
+
       const task = readTask(taskId);
       if (!task) throw new Error(`Task ${taskId} not found`);
 
