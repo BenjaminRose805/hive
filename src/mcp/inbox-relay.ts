@@ -21,7 +21,7 @@ import {
   unlinkSync,
   writeFileSync,
 } from "node:fs";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
@@ -47,6 +47,25 @@ const PROCESSED_TTL_MS = 5 * 60 * 1000; // 5 minutes
 // ---------------------------------------------------------------------------
 // Task contract types (imported inline to avoid cross-module issues in MCP)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Task ID sanitization for filesystem-safe worktree paths
+// ---------------------------------------------------------------------------
+
+function sanitizeTaskId(id: string): string {
+  return id.toLowerCase().replace(/[^a-z0-9-]/g, "-").replace(/-+/g, "-").replace(/^-|-$/g, "");
+}
+
+/** Run a git command asynchronously — non-blocking for the MCP server */
+async function gitExec(args: string[], cwd: string): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+  const proc = Bun.spawn(["git", ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+  const [stdout, stderr] = await Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+  ]);
+  const exitCode = await proc.exited;
+  return { exitCode, stdout: stdout.trim(), stderr: stderr.trim() };
+}
 
 const TASK_PHASES = [
   "ASSIGNED", "ACCEPTED", "IN_PROGRESS", "REVIEW", "VERIFY", "COMPLETE", "FAILED",
@@ -81,6 +100,8 @@ interface TaskContract {
   dependencies?: string[];
   budget?: number;
   stage?: string;
+  worktree_path?: string;
+  branch?: string;
   created: string;
   updated: string;
   history: TaskTransition[];
@@ -685,6 +706,48 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
       task.updated = now;
       writeTask(task);
 
+      // --- Per-story worktree provisioning ---
+      const projectRoot = MIND_ROOT ? resolve(MIND_ROOT, "../..") : process.cwd();
+      const sanitizedId = sanitizeTaskId(taskId);
+      const project = process.env.HIVE_SESSION ?? "hive";
+      const branch = `hive/${project}/${sanitizedId}`;
+      const wtPath = join(projectRoot, "worktrees", sanitizedId);
+
+      if (existsSync(wtPath)) {
+        // AC2: Reuse existing worktree — new agent sees previous commits
+        // AC8: Clean stale lockfiles
+        const lockFile = join(wtPath, ".git", "index.lock");
+        if (existsSync(lockFile)) {
+          try { unlinkSync(lockFile); } catch { /* best-effort */ }
+        }
+      } else {
+        // Create new worktree (async to avoid blocking MCP server)
+        const revParse = await gitExec(["-C", projectRoot, "rev-parse", "--verify", branch], projectRoot);
+        const branchExists = revParse.exitCode === 0;
+
+        const wtArgs = branchExists
+          ? ["-C", projectRoot, "worktree", "add", wtPath, branch]
+          : ["-C", projectRoot, "worktree", "add", "-b", branch, wtPath];
+
+        const result = await gitExec(wtArgs, projectRoot);
+        if (result.exitCode !== 0) {
+          process.stderr.write(`inbox-relay: Failed to create worktree ${wtPath}: ${result.stderr}\n`);
+        }
+      }
+
+      // AC10: Add worktree_path and branch to the task contract
+      task.worktree_path = wtPath;
+      task.branch = branch;
+      writeTask(task);
+
+      // Write active-worktree state file so hooks can discover the worktree
+      const activeWtDir = join(projectRoot, ".hive", "active-worktree");
+      mkdirSync(activeWtDir, { recursive: true });
+      writeFileSync(
+        join(activeWtDir, `${WORKER_ID}.json`),
+        JSON.stringify({ taskId, worktreePath: wtPath, branch, agent: WORKER_ID }, null, 2),
+      );
+
       writeDelta({
         action: "task-transition",
         agent: WORKER_ID,
@@ -693,7 +756,7 @@ async function handleTool(name: string, args: Record<string, unknown>): Promise<
         content: { from: task.history.at(-1)!.from, to: "ACCEPTED" },
       });
 
-      return JSON.stringify({ accepted: true, id: taskId, phase: "ACCEPTED" });
+      return JSON.stringify({ accepted: true, id: taskId, phase: "ACCEPTED", worktree_path: wtPath, branch });
     }
     case "hive__task_update": {
       if (!MIND_ROOT) throw new Error("HIVE_MIND_ROOT not configured");

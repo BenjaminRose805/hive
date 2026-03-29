@@ -16,7 +16,6 @@ import {
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import {
-  addWorktree,
   buildRelayMcpConfig,
   ensureDir,
   loadGlobalSettings,
@@ -887,6 +886,13 @@ function doTeardown(clean: boolean): void {
         console.log("[hive] Pruned stale git worktree references");
       }
     }
+    // Clean active-worktree state (per-story worktree mappings)
+    const activeWtDir = join(HIVE_DIR, ".hive/active-worktree");
+    if (existsSync(activeWtDir)) {
+      run(["rm", "-rf", activeWtDir]);
+      console.log("[hive] Cleaned active-worktree state");
+    }
+
     // Clean ephemeral mind state (preserve durable knowledge)
     const mindDir = join(HIVE_DIR, ".hive/mind");
     if (existsSync(mindDir)) {
@@ -1008,6 +1014,7 @@ function generateConfigs(names: string[], roles: Map<string, string>, args: Laun
         roleTools,
         getMasterSocket(),
         globalSettings.mcpServers,
+        role,
       ),
     );
 
@@ -1045,25 +1052,6 @@ function generateConfigs(names: string[], roles: Map<string, string>, args: Laun
 }
 
 // ---------------------------------------------------------------------------
-// Worktree creation
-// ---------------------------------------------------------------------------
-
-function createWorktrees(
-  names: string[],
-  roles: Map<string, string>,
-  repo: string,
-  branchPrefix: string,
-): void {
-  for (const name of names) {
-    const role = roles.get(name) ?? "engineer";
-    if (NO_WORKTREE_ROLES.has(role)) continue;
-    const worktreePath = join(worktreesDir, name);
-    const branch = `${branchPrefix}${name}`;
-    addWorktree(repo, worktreePath, branch);
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Main orchestration
 // ---------------------------------------------------------------------------
 
@@ -1084,23 +1072,11 @@ async function launchHive(args: LaunchArgs): Promise<void> {
     );
   }
 
-  // Namespace branches by project to prevent collisions between Hive instances
-  const project = process.env.HIVE_PROJECT;
-  const branchPrefix = project
-    ? args.agents.some((n) => !n.startsWith("worker-"))
-      ? `hive/${project}/`
-      : `hive/${project}/worker-`
-    : args.agents.some((n) => !n.startsWith("worker-"))
-      ? "hive/"
-      : "hive/worker-";
-
   // Generate configs
   generateConfigs(args.agents, args.roles, args);
 
-  // Create worktrees (skip for no-worktree roles like manager, architect, reviewer)
-  if (args.projectRepo) {
-    createWorktrees(args.agents, args.roles, resolve(args.projectRepo), branchPrefix);
-  }
+  // AC6: Per-story worktrees — worktrees are created at task_accept time, not launch time.
+  // The createWorktrees function is retained for backward compatibility but no longer called here.
 
   // Launch gateway
   launchGateway(token);
@@ -1166,6 +1142,7 @@ async function launchHive(args: LaunchArgs): Promise<void> {
           roleTools,
           getMasterSocket(),
           loadGlobalSettings().mcpServers,
+          role,
         ),
       );
     }
