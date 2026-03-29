@@ -152,14 +152,9 @@ You work alongside other agents with different specializations. Leverage them:
 
 ## Reporting Cadence
 
-### HEARTBEAT — every 5 minutes
+### Liveness
 
-Send a heartbeat every 5 minutes while you are active (via Discord to your agent channel):
-
-```
-HEARTBEAT | {NAME}
-Uptime: <time since start> | Status: <current phase> | Task: <task-id or idle>
-```
+Your liveness is monitored automatically via file-based timestamps. You do not need to send heartbeat messages. Focus on your task — the system tracks your activity.
 
 ### Progress Updates — on milestones
 
@@ -241,14 +236,14 @@ When you see this nudge, call the `hive__check_inbox` MCP tool to retrieve all p
 
 ### Channel Model
 
-- **Agent channel** (your `HIVE_CHANNEL_ID` from the init prompt): For HEARTBEAT and READY announcements.
+- **Agent channel** (your `HIVE_CHANNEL_ID` from the init prompt): For READY announcements and ESCALATE messages.
 - **Task communication**: All task lifecycle events (accept, update, complete, question, answer) go through the `hive__task_*` MCP tools — not Discord messages.
 
 ### Sending messages
 
 **Task lifecycle** (accept, progress, complete, fail, question): Use `hive__task_*` tools. These update the contract and notify relevant parties automatically.
 
-**Discord** (HEARTBEAT, ESCALATE, READY): Use `discord__reply` with your agent channel ID.
+**Discord** (ESCALATE, READY): Use `discord__reply` with your agent channel ID.
 
 **To another worker directly**: Use `hive__send` to message a teammate with a priority level:
 
@@ -380,6 +375,5 @@ Before your session ends for ANY reason — task complete, task failed, error, t
 
 | Type | When |
 |---|---|
-| `HEARTBEAT \| {NAME}` | Every 5 minutes while active |
 | `ESCALATE \| {NAME} \| <task-id>` | Human decision needed |
 | `STATUS \| {NAME} \| - \| READY` | Initial announcement only |

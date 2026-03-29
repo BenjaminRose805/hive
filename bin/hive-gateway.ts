@@ -178,11 +178,8 @@ function registerSelfSend(nonce: string, senderId: string): void {
 // Nudge helpers — status-aware suppression + per-worker debouncing
 // ---------------------------------------------------------------------------
 
-function shouldNudge(_worker: WorkerEntry, _priority: string = "normal"): boolean {
-  // AC1: Always nudge — no status-based suppression. All messages get delivered immediately.
-  // Priority (normal/critical) is sender intent metadata only, not a delivery filter.
-  return true;
-}
+// AC1: All messages always nudge — no status-based suppression.
+// shouldNudge removed: priority (normal/critical) is sender intent metadata only, not a delivery filter.
 
 const lastNudgeTime = new Map<string, number>(); // workerId → timestamp
 const NUDGE_COOLDOWN_MS = 15_000; // 15 seconds
@@ -486,7 +483,7 @@ async function routeInbound(msg: Message, excludeSender?: string): Promise<void>
 
   // Human messages (non-bot Discord users) always nudge — they should never be
   // silently queued behind a "focused" status gate.
-  const isHumanMessage = !msg.author.bot;
+  const _isHumanMessage = !msg.author.bot;
 
   // Write message to inbox and nudge each target worker via tmux
   const deliveries = targets.map(async (worker) => {
@@ -502,10 +499,8 @@ async function routeInbound(msg: Message, excludeSender?: string): Promise<void>
     };
     writeToInbox(worker.workerId, inboxMsg);
 
-    // Use shouldNudge + debounce instead of direct nudgeViaTmux
-    // Human messages and manager role bypass status-based suppression (always nudge)
-    const alwaysNudge = isHumanMessage || worker.role === "manager";
-    if ((alwaysNudge || shouldNudge(worker)) && !shouldDebounceNudge(worker.workerId)) {
+    // AC1: Always nudge — debounce only to prevent rapid-fire tmux sends
+    if (!shouldDebounceNudge(worker.workerId)) {
       const ok = await nudgeViaTmux(`${worker.session}:${worker.workerId}`);
       if (ok) {
         process.stderr.write(
@@ -1666,7 +1661,7 @@ function handleGetWorkerStatus(url: URL): Response {
 async function handleNudge(req: Request): Promise<Response> {
   const body = await readJson(req);
   const workerId = body.workerId as string;
-  const priority = (body.priority as string) ?? "normal";
+  const _priority = (body.priority as string) ?? "normal"; // Accepted but not used for filtering (AC1)
   const session = (body.session as string) ?? undefined;
 
   if (!workerId) return jsonErr("workerId required", 400);
@@ -1677,14 +1672,7 @@ async function handleNudge(req: Request): Promise<Response> {
   const worker = findWorkerByBareId(workerId, session);
   if (!worker) return jsonErr(`unknown worker: ${workerId}`, 404);
 
-  // Smart nudge: focused/blocked workers only interrupted by critical priority
-  if (!shouldNudge(worker, priority)) {
-    process.stderr.write(
-      `hive-gateway: nudge suppressed for ${workerId} (${worker.status}, priority=${priority})\n`,
-    );
-    return jsonOk({ nudged: false, reason: worker.status });
-  }
-
+  // AC1: All messages nudge — no status-based filtering
   if (shouldDebounceNudge(workerId)) {
     process.stderr.write(`hive-gateway: nudge debounced for ${workerId}\n`);
     return jsonOk({ nudged: false, reason: "debounced" });

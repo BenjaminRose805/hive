@@ -6,7 +6,7 @@
  * to check their inbox.
  */
 
-import { readdirSync, existsSync } from 'node:fs'
+import { readdirSync, existsSync, writeFileSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 
 const WORKER_ID = process.env.HIVE_WORKER_ID || ''
@@ -18,6 +18,16 @@ const GATEWAY_DIR = process.env.HIVE_GATEWAY_SOCKET
 if (!WORKER_ID) {
   console.log(JSON.stringify({}))
   process.exit(0)
+}
+
+// Layer 3: Touch liveness timestamp on every tool call so the watchdog
+// can detect agent activity without polling Discord for heartbeats.
+const livenessDir = join(GATEWAY_DIR, 'liveness')
+try {
+  mkdirSync(livenessDir, { recursive: true })
+  writeFileSync(join(livenessDir, `${WORKER_ID}.txt`), new Date().toISOString())
+} catch {
+  // Best-effort — don't block tool execution on liveness errors
 }
 
 const inboxDir = join(GATEWAY_DIR, 'inbox', 'messages', WORKER_ID)
