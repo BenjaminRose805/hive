@@ -4,7 +4,6 @@
  * Long-running Bun process that:
  *   - Watches pending/ for delta files and merges them into canonical mind files
  *   - Sends inbox notifications on updates
- *   - Takes periodic git snapshots of durable knowledge
  *
  * Single writer for: contracts/, decisions/, changelog/
  * CLI writes to:      pending/, inbox/, agents/
@@ -44,7 +43,6 @@ const PROJECT_ROOT = resolve(SCRIPT_DIR, "../..");
 const MIND_ROOT = join(PROJECT_ROOT, ".hive", "mind");
 
 const POLL_INTERVAL_MS = 2_000;
-const GIT_SNAPSHOT_INTERVAL_MS = 300_000;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
 const GATEWAY_SOCKET = process.env.HIVE_GATEWAY_SOCKET ?? "/tmp/hive-gateway/gateway.sock";
@@ -106,13 +104,9 @@ function pidFile(): string {
 /** Per-topic mutex keyed by "{target_type}/{target_topic}" */
 const topicMutexes = new Map<string, Promise<void>>();
 
-/** Tracks whether changelog has new entries since last git snapshot */
-let changesSinceSnapshot = false;
-
 /** Interval/watcher handles for cleanup */
 let pendingWatcher: FSWatcher | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
-let gitSnapshotTimer: ReturnType<typeof setInterval> | null = null;
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
 /** Flag to prevent re-entrant processing */
@@ -220,7 +214,6 @@ function appendChangelog(entry: ChangelogEntry): void {
   const date = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
   const filePath = join(dir, `${date}.jsonl`);
   appendFileSync(filePath, `${JSON.stringify(entry)}\n`);
-  changesSinceSnapshot = true;
 }
 
 // ---------------------------------------------------------------------------
@@ -526,66 +519,6 @@ function resolveManagerName(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Git snapshot
-// ---------------------------------------------------------------------------
-
-function runGitSnapshot(): void {
-  if (!changesSinceSnapshot) return;
-
-  try {
-    // Stage only durable knowledge directories
-    const addResult = Bun.spawnSync({
-      cmd: [
-        "git",
-        "add",
-        join(MIND_ROOT, "contracts"),
-        join(MIND_ROOT, "decisions"),
-        join(MIND_ROOT, "agents"),
-        join(MIND_ROOT, "changelog"),
-      ],
-      cwd: PROJECT_ROOT,
-      stderr: "pipe",
-    });
-
-    if (addResult.exitCode !== 0) {
-      // Nothing to add or git issue — skip
-      return;
-    }
-
-    // Check if there are actually staged changes
-    const diffResult = Bun.spawnSync({
-      cmd: ["git", "diff", "--cached", "--quiet"],
-      cwd: PROJECT_ROOT,
-      stderr: "pipe",
-    });
-
-    if (diffResult.exitCode === 0) {
-      // No staged changes
-      changesSinceSnapshot = false;
-      return;
-    }
-
-    const date = new Date().toISOString().replace(/[:.]/g, "-").slice(0, 19);
-    const commitResult = Bun.spawnSync({
-      cmd: ["git", "commit", "-m", `mind: snapshot ${date}`, "--no-verify"],
-      cwd: PROJECT_ROOT,
-      stderr: "pipe",
-    });
-
-    if (commitResult.exitCode === 0) {
-      changesSinceSnapshot = false;
-    } else {
-      const stderr = commitResult.stderr.toString();
-      if (stderr) {
-        process.stderr.write(`[hive-mind-daemon] Git snapshot failed: ${stderr}\n`);
-      }
-    }
-  } catch (err) {
-    process.stderr.write(`[hive-mind-daemon] Git snapshot error: ${(err as Error).message}\n`);
-  }
-}
-
-// ---------------------------------------------------------------------------
 // PID / heartbeat
 // ---------------------------------------------------------------------------
 
@@ -679,13 +612,6 @@ async function startup(): Promise<void> {
     }
   }, POLL_INTERVAL_MS);
 
-  // Git snapshot
-  gitSnapshotTimer = setInterval(() => {
-    if (!shuttingDown) {
-      runGitSnapshot();
-    }
-  }, GIT_SNAPSHOT_INTERVAL_MS);
-
   // Heartbeat
   heartbeatTimer = setInterval(() => {
     if (!shuttingDown) {
@@ -715,10 +641,6 @@ async function shutdown(): Promise<void> {
     clearInterval(pollTimer);
     pollTimer = null;
   }
-  if (gitSnapshotTimer) {
-    clearInterval(gitSnapshotTimer);
-    gitSnapshotTimer = null;
-  }
   if (heartbeatTimer) {
     clearInterval(heartbeatTimer);
     heartbeatTimer = null;
@@ -727,10 +649,6 @@ async function shutdown(): Promise<void> {
   // Drain remaining pending deltas
   processing = false; // Reset so processAllPending can run
   await processAllPending();
-
-  // Final git snapshot
-  changesSinceSnapshot = true; // Force check
-  runGitSnapshot();
 
   // Remove PID file
   removePidFile();
