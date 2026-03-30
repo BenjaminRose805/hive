@@ -92,18 +92,6 @@ function validateJSON(data: string | undefined): unknown {
 
 import { atomicWrite, readJSONFile } from "../src/mind/fs-utils.ts";
 
-function timeSince(isoDate: string): string {
-  const ms = Date.now() - new Date(isoDate).getTime();
-  const secs = Math.floor(ms / 1000);
-  if (secs < 60) return `${secs}s ago`;
-  const mins = Math.floor(secs / 60);
-  if (mins < 60) return `${mins}m ago`;
-  const hours = Math.floor(mins / 60);
-  if (hours < 24) return `${hours}h ago`;
-  const days = Math.floor(hours / 24);
-  return `${days}d ago`;
-}
-
 // ---------------------------------------------------------------------------
 // Path helpers
 // ---------------------------------------------------------------------------
@@ -225,9 +213,8 @@ async function cmdPublish(args: ParsedArgs): Promise<void> {
   console.log(JSON.stringify({ status: "queued", delta: filename }));
 }
 
-/** read — read canonical file + write register-reader delta to pending/ */
-async function cmdRead(args: ParsedArgs): Promise<void> {
-  const agent = validateAgent(args.agent);
+/** read — read canonical file */
+function cmdRead(args: ParsedArgs): void {
   const type = validateEntryType(args.type);
   const topic = validateTopic(args.topic);
 
@@ -237,18 +224,6 @@ async function cmdRead(args: ParsedArgs): Promise<void> {
   if (!entry) {
     cliError("not_found", 2, `${type}s/${topic} not published`);
   }
-
-  // Write register-reader delta to pending/
-  const delta: DeltaFile = {
-    agent,
-    action: "register-reader",
-    target_type: type,
-    target_topic: topic,
-    reader: { read_version: entry.version },
-  };
-
-  const filename = `${Date.now()}-${agent}-register-reader.json`;
-  await atomicWrite(pendingDir(), filename, delta);
 
   // Print the canonical entry to stdout
   console.log(JSON.stringify(entry, null, 2));
@@ -615,7 +590,7 @@ async function main(): Promise<void> {
       await cmdPublish(args);
       break;
     case "read":
-      await cmdRead(args);
+      cmdRead(args);
       break;
     case "list":
       cmdList(args);

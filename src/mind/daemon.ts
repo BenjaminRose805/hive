@@ -3,11 +3,10 @@
  *
  * Long-running Bun process that:
  *   - Watches pending/ for delta files and merges them into canonical mind files
- *   - Tracks readers and sends notifications
  *   - Sends inbox notifications on updates
  *   - Takes periodic git snapshots of durable knowledge
  *
- * Single writer for: contracts/, decisions/, readers/, changelog/
+ * Single writer for: contracts/, decisions/, changelog/
  * CLI writes to:      pending/, inbox/, agents/
  */
 
@@ -31,8 +30,6 @@ import type {
   InboxMessage,
   InboxPriority,
   MindEntry,
-  ReaderEntry,
-  ReaderRegistry,
   TaskContract,
   TaskPhase,
 } from "./mind-types";
@@ -81,10 +78,6 @@ function canonicalDir(type: string): string {
   return join(MIND_ROOT, `${type}s`);
 }
 
-function _readersPath(type: string, topic: string): string {
-  return join(MIND_ROOT, "readers", `${type}s`, `${topic}.json`);
-}
-
 function gatewayInboxDir(agent: string): string {
   return join(dirname(GATEWAY_SOCKET), "inbox", "messages", agent);
 }
@@ -109,9 +102,6 @@ function pidFile(): string {
 // ---------------------------------------------------------------------------
 // In-memory state
 // ---------------------------------------------------------------------------
-
-/** Reader registries keyed by "{type}s/{topic}" */
-const readerRegistries = new Map<string, ReaderRegistry>();
 
 /** Per-topic mutex keyed by "{target_type}/{target_topic}" */
 const topicMutexes = new Map<string, Promise<void>>();
@@ -234,85 +224,6 @@ function appendChangelog(entry: ChangelogEntry): void {
 }
 
 // ---------------------------------------------------------------------------
-// Reader registry helpers
-// ---------------------------------------------------------------------------
-
-function registryKey(type: string, topic: string): string {
-  return `${type}s/${topic}`;
-}
-
-function loadReadersFromDisk(): void {
-  const readersRoot = join(MIND_ROOT, "readers");
-  if (!existsSync(readersRoot)) return;
-
-  for (const typeDir of readdirSync(readersRoot)) {
-    const typePath = join(readersRoot, typeDir);
-    try {
-      const _stat = Bun.file(typePath);
-      // Skip if not a directory-like path (we check by listing)
-      const files = readdirSync(typePath);
-      for (const file of files) {
-        if (!file.endsWith(".json")) continue;
-        const registry = readJSONFile<ReaderRegistry>(join(typePath, file));
-        if (registry) {
-          const topic = file.replace(/\.json$/, "");
-          readerRegistries.set(`${typeDir}/${topic}`, registry);
-        }
-      }
-    } catch {
-      // Not a directory or unreadable, skip
-    }
-  }
-}
-
-async function flushReaderRegistry(type: string, topic: string): Promise<void> {
-  const key = registryKey(type, topic);
-  const registry = readerRegistries.get(key);
-  if (!registry) return;
-  const dir = join(MIND_ROOT, "readers", `${type}s`);
-  await atomicWrite(dir, `${topic}.json`, registry);
-}
-
-// ---------------------------------------------------------------------------
-// Notify stale readers
-// ---------------------------------------------------------------------------
-
-async function notifyStaleReaders(
-  type: string,
-  topic: string,
-  newVersion: number,
-  author: string,
-  breaking: boolean,
-): Promise<void> {
-  const key = registryKey(type, topic);
-  const registry = readerRegistries.get(key);
-  if (!registry) return;
-
-  for (const reader of registry.readers) {
-    if (reader.read_version < newVersion && reader.agent !== author) {
-      const priority: InboxPriority = breaking ? "alert" : "info";
-      await writeInboxMessage(reader.agent, {
-        from: "hive-mind",
-        type: "mind-update",
-        priority,
-        topic: `${type}s/${topic}`,
-        content: `${type} "${topic}" updated to v${newVersion} by ${author}${breaking ? " [BREAKING]" : ""}`,
-        old_version: reader.read_version,
-        new_version: newVersion,
-      });
-      await nudgeWorker(reader.agent, breaking ? "alert" : "info");
-      await pushDiscordNotification(
-        reader.agent,
-        `${type}s/${topic}`,
-        newVersion,
-        breaking ?? false,
-        `${type}s/${topic} updated to v${newVersion}`,
-      );
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Delta processing
 // ---------------------------------------------------------------------------
 
@@ -335,15 +246,6 @@ async function processDelta(delta: DeltaFile): Promise<void> {
 
       ensureDir(canonicalDir(type));
       await atomicWrite(canonicalDir(type), `${topic}.json`, entry);
-
-      // Update reader registry version
-      const key = registryKey(type, topic);
-      const reg = readerRegistries.get(key);
-      if (reg) {
-        reg.version = version;
-      }
-
-      await notifyStaleReaders(type, topic, version, agent, delta.breaking ?? false);
 
       appendChangelog({
         timestamp: new Date().toISOString(),
@@ -413,15 +315,6 @@ async function processDelta(delta: DeltaFile): Promise<void> {
 
       await atomicWrite(canonicalDir(type), `${topic}.json`, updated);
 
-      // Update reader registry version
-      const key = registryKey(type, topic);
-      const reg = readerRegistries.get(key);
-      if (reg) {
-        reg.version = newVersion;
-      }
-
-      await notifyStaleReaders(type, topic, newVersion, agent, delta.breaking ?? false);
-
       appendChangelog({
         timestamp: new Date().toISOString(),
         agent,
@@ -448,8 +341,6 @@ async function processDelta(delta: DeltaFile): Promise<void> {
 
       await atomicWrite(canonicalDir(type), `${topic}.json`, retracted);
 
-      await notifyStaleReaders(type, topic, existing.version, agent, delta.breaking ?? false);
-
       appendChangelog({
         timestamp: new Date().toISOString(),
         agent,
@@ -459,45 +350,6 @@ async function processDelta(delta: DeltaFile): Promise<void> {
         version: existing.version,
         breaking: delta.breaking ?? false,
       });
-      break;
-    }
-
-    case "register-reader": {
-      const key = registryKey(type, topic);
-      let registry = readerRegistries.get(key);
-
-      // Determine current version from canonical file
-      const cPath = canonicalPath(type, topic);
-      const existing = readJSONFile<MindEntry>(cPath);
-      const currentVersion = existing?.version ?? 0;
-
-      if (!registry) {
-        registry = {
-          topic,
-          type: `${type}s`,
-          version: currentVersion,
-          readers: [],
-        };
-        readerRegistries.set(key, registry);
-      }
-
-      const readVersion = delta.reader?.read_version ?? currentVersion;
-
-      // Update or add reader entry
-      const existingReader = registry.readers.find((r) => r.agent === agent);
-      if (existingReader) {
-        existingReader.read_version = readVersion;
-        existingReader.read_at = new Date().toISOString();
-      } else {
-        const entry: ReaderEntry = {
-          agent,
-          read_version: readVersion,
-          read_at: new Date().toISOString(),
-        };
-        registry.readers.push(entry);
-      }
-
-      await flushReaderRegistry(type, topic);
       break;
     }
 
@@ -775,9 +627,6 @@ function ensureMindDirs(): void {
     join(MIND_ROOT, "pending", ".failed"),
     join(MIND_ROOT, "tasks"),
     join(MIND_ROOT, "agents"),
-    join(MIND_ROOT, "readers"),
-    join(MIND_ROOT, "readers", "contracts"),
-    join(MIND_ROOT, "readers", "decisions"),
     join(MIND_ROOT, "changelog"),
   ];
   for (const d of dirs) {
@@ -798,12 +647,6 @@ async function startup(): Promise<void> {
   // Write PID file
   await writePidFile();
   console.log(`[hive-mind-daemon] PID ${process.pid} written to ${pidFile()}`);
-
-  // Load in-memory state from disk
-  loadReadersFromDisk();
-
-  const readerCount = readerRegistries.size;
-  console.log(`[hive-mind-daemon] Loaded ${readerCount} reader registries`);
 
   // Crash recovery: process any existing pending deltas
   await processAllPending();

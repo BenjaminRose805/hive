@@ -19,23 +19,6 @@ export interface MindEntry {
 }
 
 // ---------------------------------------------------------------------------
-// Reader Registry (stored in readers/)
-// ---------------------------------------------------------------------------
-
-export interface ReaderEntry {
-  agent: string;
-  read_version: number;
-  read_at: string; // ISO-8601
-}
-
-export interface ReaderRegistry {
-  topic: string;
-  type: string; // "contracts" | "decisions"
-  version: number;
-  readers: ReaderEntry[];
-}
-
-// ---------------------------------------------------------------------------
 // Inbox Messages (stored in inbox/{agent}/)
 // ---------------------------------------------------------------------------
 
@@ -58,7 +41,7 @@ export interface InboxMessage {
 // Delta Files (written to pending/)
 // ---------------------------------------------------------------------------
 
-export type DeltaAction = "publish" | "update" | "retract" | "register-reader" | "task-create" | "task-transition";
+export type DeltaAction = "publish" | "update" | "retract" | "task-create" | "task-transition";
 
 export interface DeltaFile {
   agent: string;
@@ -69,10 +52,6 @@ export interface DeltaFile {
   content?: unknown;
   tags?: string[];
   breaking?: boolean;
-  // For register-reader
-  reader?: {
-    read_version: number;
-  };
 }
 
 // ---------------------------------------------------------------------------
