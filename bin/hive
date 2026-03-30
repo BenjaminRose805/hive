@@ -82,12 +82,6 @@ switch (subcommand) {
     await mod.main(subArgs)
     break
   }
-  case 'register-commands': {
-    const mod = await import('../src/register-commands.ts')
-    await mod.main(subArgs)
-    break
-  }
-
   default:
     console.log(`hive — Discord multi-session Claude Code orchestrator
 
@@ -110,6 +104,5 @@ Direct commands (standalone):
 
 Utilities:
   gen-config          Generate per-worker configuration files
-  register-commands   Register Discord slash commands
 `)
 }
