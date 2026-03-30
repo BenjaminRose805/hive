@@ -2,16 +2,11 @@
 /**
  * check-scope.mjs — Claude Code PreToolUse hook for file scope enforcement.
  *
- * Two modes:
- *   1. Module map mode (.hive/modules.json exists): notify owner on cross-module edits, never block.
- *   2. Legacy scope mode (.hive/scope/{agent}.json): block out-of-scope writes (backward compatible).
- *
- * In module map mode, cross-module edits write a scope-notify delta to .hive/mind/pending/
- * for the Mind daemon to process. The daemon notifies the module owner at info priority.
+ * Uses legacy scope mode (.hive/scope/{agent}.json) to block out-of-scope writes.
  */
 
-import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'fs'
-import { resolve, relative, isAbsolute, join } from 'path'
+import { readFileSync } from 'fs'
+import { resolve, relative, isAbsolute } from 'path'
 import { stdin } from 'process'
 
 // --- Helpers ---
@@ -124,33 +119,7 @@ if (relPath.startsWith('..') && relFromHiveRoot.startsWith('..')) {
 // Use HIVE_ROOT-relative path for matching when file is within the hive root
 const matchPath = relFromHiveRoot.startsWith('..') ? relPath : relFromHiveRoot
 
-// --- Try module map mode first ---
-const MODULE_MAP_PATH = resolve(HIVE_ROOT, '.hive', 'modules.json')
-
-let moduleMap = null
-try {
-  moduleMap = JSON.parse(readFileSync(MODULE_MAP_PATH, 'utf-8'))
-} catch {
-  // No module map — fall through to legacy scope mode
-}
-
-if (moduleMap) {
-  const result = resolveFileOwnership(matchPath, moduleMap)
-
-  if (result.kind === 'shared') { allow() }
-  if (result.kind === 'owned' && result.owner === AGENT_NAME) { allow() }
-  if (result.kind === 'owned') {
-    writeScopeNotifyDelta(AGENT_NAME, matchPath, toolName, result.owner, result.module)
-    allow()
-  }
-  if (result.kind === 'unassigned') {
-    writeScopeNotifyDelta(AGENT_NAME, matchPath, toolName, result.fallback_owner, '_unassigned')
-    allow()
-  }
-  allow()
-}
-
-// --- Legacy scope mode: block out-of-scope writes ---
+// --- Scope mode: block out-of-scope writes ---
 const SCOPE_FILE = resolve(HIVE_ROOT, '.hive', 'scope', `${AGENT_NAME}.json`)
 
 let scope
@@ -182,43 +151,3 @@ const reason = [
 ].join('\n')
 
 deny(reason)
-
-// --- Module map helpers ---
-
-function resolveFileOwnership(filePath, config) {
-  for (const pattern of (config.shared || [])) {
-    if (globToRegex(pattern).test(filePath)) {
-      return { kind: 'shared', pattern }
-    }
-  }
-  for (const [moduleName, moduleDef] of Object.entries(config.modules || {})) {
-    for (const pattern of (moduleDef.files || [])) {
-      if (globToRegex(pattern).test(filePath)) {
-        return { kind: 'owned', module: moduleName, owner: moduleDef.owner, pattern }
-      }
-    }
-  }
-  return { kind: 'unassigned', fallback_owner: config.unassigned_owner || 'monarch' }
-}
-
-function writeScopeNotifyDelta(editor, file, tool, owner, moduleName) {
-  const pendingDir = resolve(HIVE_ROOT, '.hive', 'mind', 'pending')
-  try { mkdirSync(pendingDir, { recursive: true }) } catch {}
-
-  const delta = {
-    agent: editor,
-    action: 'scope-notify',
-    target_type: 'module',
-    target_topic: moduleName,
-    content: { file, tool, owner, module: moduleName },
-  }
-
-  const filename = `${Date.now()}-${editor}-scope-notify.json`
-  const tmpPath = join(pendingDir, `.tmp-${filename}`)
-  const finalPath = join(pendingDir, filename)
-
-  try {
-    writeFileSync(tmpPath, JSON.stringify(delta, null, 2))
-    renameSync(tmpPath, finalPath)
-  } catch {}
-}
