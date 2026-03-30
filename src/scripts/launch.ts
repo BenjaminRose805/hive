@@ -6,7 +6,7 @@
 
 import {
   chmodSync,
-  copyFileSync,
+
   existsSync,
   readdirSync,
   readFileSync,
@@ -528,20 +528,6 @@ function prepareWorker(
   const prompt = composeSystemPrompt(name, role, domain, team, personality);
   const promptFile = join(getStateDir(), `.prompt-${name}.md`);
   writeFileSync(promptFile, prompt);
-
-  // Install pre-commit hook (worktree roles only)
-  if (!isNoWorktreeRole) {
-    const dotGitPath = join(workDir, ".git");
-    if (existsSync(dotGitPath)) {
-      const dotGit = readFileSync(dotGitPath, "utf8").trim();
-      const gitDir = dotGit.startsWith("gitdir: ") ? dotGit.slice(8) : dotGitPath;
-      const hooksDir = join(gitDir, "hooks");
-      ensureDir(hooksDir);
-      const hookDest = join(hooksDir, "pre-commit");
-      copyFileSync(join(HIVE_DIR, "hooks/pre-commit-scope.sh"), hookDest);
-      chmodSync(hookDest, 0o755);
-    }
-  }
 
   // Write launch script
   const scriptPath = join(getStateDir(), `.launch-worker-${name}.sh`);
