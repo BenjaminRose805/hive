@@ -59,7 +59,6 @@ interface LaunchArgs {
   agents: string[];
   roles: Map<string, string>;
   domains: Map<string, string>;
-  personalities: Record<string, string>;
   token: string;
   tools: string;
   teardown: boolean;
@@ -77,19 +76,11 @@ function parseArgs(argv: string[]): LaunchArgs {
     agents: [],
     roles: new Map(),
     domains: new Map(),
-    personalities: {},
     token: "",
     tools: "",
     teardown: false,
     clean: false,
   };
-
-  // Load personalities from env (set by projectUp from config.json)
-  if (process.env.HIVE_PERSONALITIES) {
-    try {
-      args.personalities = JSON.parse(process.env.HIVE_PERSONALITIES);
-    } catch {}
-  }
 
   let i = 0;
   while (i < argv.length) {
@@ -406,7 +397,6 @@ function composeSystemPrompt(
   role: string,
   domain?: string,
   team?: TeamMember[],
-  personality?: string,
 ): string {
   const domainLabel = domain ? ` specializing in ${domain}` : "";
   const sub = (text: string) =>
@@ -442,15 +432,6 @@ function composeSystemPrompt(
   // Team roster (so every agent knows who's on the team)
   if (team && team.length > 0) {
     prompt += `\n\n${buildTeamRoster(name, team)}`;
-  }
-
-  // Agent personality (individual character on top of role voice)
-  if (personality) {
-    prompt += "\n\n## Your Personality\n\n";
-    prompt += `You are **${name}**. ${personality}\n\n`;
-    prompt += "Let this personality color your announcements, status updates, and peer messages. ";
-    prompt +=
-      "Stay professional in protocol messages (TASK_ASSIGN, COMPLETE, etc.) but let your character show in casual communication and your READY announcement.";
   }
 
   // Mind prompt section
@@ -500,7 +481,6 @@ function prepareWorker(
   name: string,
   role: string,
   domain: string | undefined,
-  personality: string | undefined,
   args: LaunchArgs,
   team: TeamMember[],
 ): PreparedWorker {
@@ -511,7 +491,7 @@ function prepareWorker(
   const workDir = isNoWorktreeRole ? resolve(args.projectRepo) : join(worktreesDir, name);
 
   // Compose and write system prompt
-  const prompt = composeSystemPrompt(name, role, domain, team, personality);
+  const prompt = composeSystemPrompt(name, role, domain, team);
   const promptFile = join(getStateDir(), `.prompt-${name}.md`);
   writeFileSync(promptFile, prompt);
 
@@ -1210,8 +1190,7 @@ async function launchHive(args: LaunchArgs): Promise<void> {
   const prepared: PreparedWorker[] = args.agents.map(name => {
     const role = args.roles.get(name) ?? "engineer";
     const domain = args.domains.get(name);
-    const personality = args.personalities[name];
-    return prepareWorker(name, role, domain, personality, args, team);
+    return prepareWorker(name, role, domain, args, team);
   });
 
   // Phase 2: Spawn all tmux windows (fast, no sleeps between them)
@@ -1270,7 +1249,6 @@ export async function projectUp(args: string[]): Promise<void> {
   const project = resolveProject(config, projectName);
 
   if (project.admin_ids) process.env.HIVE_ADMIN_IDS = project.admin_ids;
-  if (project.personalities) process.env.HIVE_PERSONALITIES = JSON.stringify(project.personalities);
 
   const cliArgs: string[] = ["--project-repo", project.repo, "--channel-id", project.channel];
   if (project.agents) cliArgs.push("--agents", project.agents);
