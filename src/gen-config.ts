@@ -907,17 +907,6 @@ function generateSingleBot(args: Args): void {
         ],
       });
 
-      // Add OMC mode enforcement hook to PreToolUse (Write|Edit only)
-      mergedHooks.PreToolUse.push({
-        matcher: "Write|Edit",
-        hooks: [
-          {
-            type: "command",
-            command: `node "${join(HIVE_ROOT, "hooks", "enforce-omc-mode.mjs")}"`,
-          },
-        ],
-      });
-
       // AC7: PostToolUse inbox polling — check for unread messages after every tool call
       if (!mergedHooks.PostToolUse) mergedHooks.PostToolUse = [];
       mergedHooks.PostToolUse.push({

@@ -1052,17 +1052,6 @@ function generateConfigs(names: string[], roles: Map<string, string>, args: Laun
         ],
       });
 
-      // OMC mode enforcement hook (Write|Edit only)
-      mergedHooks.PreToolUse.push({
-        matcher: "Write|Edit",
-        hooks: [
-          {
-            type: "command",
-            command: `node "${join(HIVE_DIR, "hooks", "enforce-omc-mode.mjs")}"`,
-          },
-        ],
-      });
-
       // PostToolUse inbox polling — check for unread messages after every tool call
       if (!mergedHooks.PostToolUse) mergedHooks.PostToolUse = [];
       mergedHooks.PostToolUse.push({
