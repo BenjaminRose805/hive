@@ -8,8 +8,6 @@
  *   list         --type contracts|decisions [--author <name>]
  *   watch        --topic <name> --type contract|decision --agent <name> --default <string> [--expect-from <agent>]
  *   check-watches --agent <name>
- *   load         --agent <name>
- *   save         --agent <name> --type context|preferences|history --data '<json>'
  *   clear        --agent <name> [--type <type>]
  *   view         --agent <name>
  */
@@ -22,7 +20,6 @@ import type { CliError, DeltaFile, MindEntry, WatchEntry } from "../src/mind/min
 // Constants
 // ---------------------------------------------------------------------------
 
-const HISTORY_CAP = 50;
 const VALID_SAVE_TYPES = ["context", "preferences", "history"] as const;
 type SaveType = (typeof VALID_SAVE_TYPES)[number];
 
@@ -385,233 +382,6 @@ function cmdCheckWatches(args: ParsedArgs): void {
   console.log("");
 }
 
-/** load — generate system prompt section */
-function cmdLoad(args: ParsedArgs): void {
-  const agent = validateAgent(args.agent);
-  const agDir = agentDir(agent);
-
-  const lines: string[] = [];
-  lines.push("--- MEMORY RESTORATION ---");
-  lines.push(`You are resuming as "${agent}". Here is what you remember:`);
-  lines.push("");
-
-  // --- Personal context ---
-  const context = readJSONFile(join(agDir, "context.json")) as Record<string, unknown> | null;
-  const preferences = readJSONFile(join(agDir, "preferences.json")) as Record<
-    string,
-    unknown
-  > | null;
-  const history = readJSONFile(join(agDir, "history.json")) as unknown[] | null;
-
-  lines.push("## Last Session");
-  if (context) {
-    const task = context.lastTask ?? context.lastWorkedOn ?? null;
-    const branch = context.lastBranch ?? null;
-    const outcome = context.outcome ?? null;
-    if (task) lines.push(`Task: ${task}`);
-    if (branch) lines.push(`Branch: ${branch}`);
-    if (outcome) lines.push(`Outcome: ${outcome}`);
-    if (!task && !branch && !outcome) lines.push("(context recorded — see full context below)");
-  } else {
-    lines.push("(no context recorded)");
-  }
-  lines.push("");
-
-  // Known Files
-  lines.push("## Known Files");
-  if (context) {
-    const knownFiles = context.knownFiles;
-    if (Array.isArray(knownFiles) && knownFiles.length > 0) {
-      for (const f of knownFiles) lines.push(`- ${f}`);
-    } else {
-      lines.push("(none recorded)");
-    }
-  } else {
-    lines.push("(none recorded)");
-  }
-  lines.push("");
-
-  // Discoveries
-  lines.push("## Discoveries");
-  if (context) {
-    const discoveries = context.discoveries;
-    if (Array.isArray(discoveries) && discoveries.length > 0) {
-      for (const d of discoveries) lines.push(`- ${d}`);
-    } else {
-      lines.push("(none recorded)");
-    }
-  } else {
-    lines.push("(none recorded)");
-  }
-  lines.push("");
-
-  // Open Questions
-  lines.push("## Open Questions");
-  if (context) {
-    const questions = context.openQuestions;
-    if (Array.isArray(questions) && questions.length > 0) {
-      for (const q of questions) lines.push(`- ${q}`);
-    } else {
-      lines.push("(none recorded)");
-    }
-  } else {
-    lines.push("(none recorded)");
-  }
-  lines.push("");
-
-  // Preferences
-  lines.push("## Your Preferences");
-  if (preferences) {
-    const codingStyle = preferences.codingStyle ?? null;
-    const testingApproach = preferences.testingApproach ?? null;
-    const communicationStyle = preferences.communicationStyle ?? null;
-    const tools = preferences.tools ?? null;
-    if (codingStyle) lines.push(`Coding Style: ${codingStyle}`);
-    if (testingApproach) lines.push(`Testing Approach: ${testingApproach}`);
-    if (communicationStyle) lines.push(`Communication Style: ${communicationStyle}`);
-    if (tools) {
-      if (Array.isArray(tools)) {
-        lines.push(`Preferred Tools: ${tools.join(", ")}`);
-      } else {
-        lines.push(`Preferred Tools: ${tools}`);
-      }
-    }
-    if (!codingStyle && !testingApproach && !communicationStyle && !tools) {
-      lines.push("(preferences recorded — see full preferences below)");
-    }
-  } else {
-    lines.push("(none recorded)");
-  }
-  lines.push("");
-
-  // Recent History (last 3)
-  if (Array.isArray(history) && history.length > 0) {
-    lines.push("## Recent Task History");
-    const recent = history.slice(-3);
-    for (const entry of recent) {
-      if (typeof entry === "object" && entry !== null) {
-        const e = entry as Record<string, unknown>;
-        const task = e.task ?? e.description ?? "(unknown task)";
-        const outcome = e.outcome ?? e.result ?? "(unknown outcome)";
-        const date = e.date ?? e.timestamp ?? e.completedAt ?? null;
-        lines.push(`- Task: ${task} | Outcome: ${outcome}${date ? ` | Date: ${date}` : ""}`);
-      }
-    }
-    lines.push("");
-  }
-
-  // --- Hive Mind sections ---
-
-  // Active watches
-  lines.push("## Active Watches");
-  const wFile = watchesFile(agent);
-  const watches = readJSONFile(wFile) as WatchEntry[] | null;
-  if (watches && watches.length > 0) {
-    const waiting = watches.filter((w) => w.status === "waiting");
-    if (waiting.length > 0) {
-      for (const w of waiting) {
-        const expectLine = w.expect_from ? ` (expecting from: ${w.expect_from})` : "";
-        lines.push(`- WAITING: ${w.type}/${w.topic} since ${timeSince(w.since)}${expectLine}`);
-        lines.push(`  Default action: ${w.default_action}`);
-      }
-    } else {
-      lines.push("(no active watches)");
-    }
-  } else {
-    lines.push("(no active watches)");
-  }
-  lines.push("");
-
-  // Recently published by this agent
-  lines.push("## Your Published Items");
-  let hasPublished = false;
-  for (const entryType of VALID_ENTRY_TYPES) {
-    const dir = typesDir(entryType);
-    if (!existsSync(dir)) continue;
-    const files = readdirSync(dir).filter((f) => f.endsWith(".json"));
-    for (const file of files) {
-      const entry = readJSONFile(join(dir, file)) as MindEntry | null;
-      if (!entry || entry.author !== agent || entry.retracted) continue;
-      const topic = file.replace(/\.json$/, "");
-      lines.push(`- ${entryType}/${topic} v${entry.version} (updated ${entry.updated})`);
-      hasPublished = true;
-    }
-  }
-  if (!hasPublished) {
-    lines.push("(none published)");
-  }
-  lines.push("");
-
-  // Hive Mind overview — all published contracts/decisions for team awareness
-  lines.push("## Hive Mind Overview");
-  let overviewCount = 0;
-  for (const entryType of VALID_ENTRY_TYPES) {
-    const dir = typesDir(entryType);
-    if (!existsSync(dir)) continue;
-    const files = readdirSync(dir).filter((f) => f.endsWith(".json"));
-    for (const file of files) {
-      const entry = readJSONFile(join(dir, file)) as MindEntry | null;
-      if (!entry || entry.retracted) continue;
-      const topic = file.replace(/\.json$/, "");
-      const tags = entry.tags.length > 0 ? ` [${entry.tags.join(", ")}]` : "";
-      lines.push(`- ${entryType}/${topic} by ${entry.author} v${entry.version}${tags}`);
-      overviewCount++;
-    }
-  }
-  if (overviewCount === 0) {
-    lines.push("(no contracts or decisions published yet)");
-  }
-  lines.push("");
-
-  lines.push("--- END MEMORY ---");
-  console.log(lines.join("\n"));
-}
-
-/** save — write to agents/{name}/{type}.json */
-async function cmdSave(args: ParsedArgs): Promise<void> {
-  const agent = validateAgent(args.agent);
-  const type = args.type;
-  if (!type || !VALID_SAVE_TYPES.includes(type as SaveType)) {
-    cliError("invalid_type", 1, `--type must be one of: ${VALID_SAVE_TYPES.join(", ")}`);
-  }
-  const saveType = type as SaveType;
-
-  let rawData = args.data;
-  if (!rawData) {
-    rawData = await new Response(Bun.stdin.stream()).text();
-  }
-  if (!rawData || rawData.trim() === "") {
-    cliError("missing_data", 1, "No data provided (use --data or pipe JSON to stdin)");
-  }
-
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(rawData);
-  } catch (e) {
-    cliError("invalid_json", 1, `Invalid JSON: ${(e as Error).message}`);
-  }
-
-  const dir = agentDir(agent);
-
-  // History cap enforcement
-  if (saveType === "history") {
-    const existing = readJSONFile(join(dir, "history.json"));
-    let entries: unknown[] = Array.isArray(existing) ? existing : [];
-    const incoming = Array.isArray(parsed) ? parsed : [parsed];
-    entries = [...entries, ...incoming];
-    if (entries.length > HISTORY_CAP) {
-      entries = entries.slice(entries.length - HISTORY_CAP);
-    }
-    await atomicWrite(dir, "history.json", entries);
-    console.log(
-      `Saved ${incoming.length} history entry(ies) for agent "${agent}" (total: ${entries.length}, cap: ${HISTORY_CAP})`,
-    );
-    return;
-  }
-
-  await atomicWrite(dir, `${saveType}.json`, parsed);
-  console.log(`Saved ${saveType} for agent "${agent}"`);
-}
 
 /** clear — remove agent's personal context files */
 function cmdClear(args: ParsedArgs): void {
@@ -728,12 +498,6 @@ async function main(): Promise<void> {
     case "check-watches":
       cmdCheckWatches(args);
       break;
-    case "load":
-      cmdLoad(args);
-      break;
-    case "save":
-      await cmdSave(args);
-      break;
     case "clear":
       cmdClear(args);
       break;
@@ -753,8 +517,6 @@ Commands:
   list          --type contracts|decisions [--author <name>]
   watch         --topic <name> --type contract|decision --agent <name> --default <string> [--expect-from <agent>]
   check-watches --agent <name>
-  load          --agent <name>
-  save          --agent <name> --type context|preferences|history --data '<json>'
   clear         --agent <name> [--type <type>]
   view          --agent <name>
   daemon        Start the Hive Mind daemon process`,

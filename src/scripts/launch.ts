@@ -459,12 +459,6 @@ function composeSystemPrompt(
     prompt += `\n\n${readFileSync(mindSectionPath, "utf8").replaceAll("{NAME}", name)}`;
   }
 
-  // Mind restoration block
-  const mindLoad = run(["bun", "run", join(HIVE_DIR, "bin/hive-mind.ts"), "load", "--agent", name]);
-  if (mindLoad.exitCode === 0 && mindLoad.stdout) {
-    prompt += `\n\n${mindLoad.stdout}`;
-  }
-
   return prompt;
 }
 
