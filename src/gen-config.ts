@@ -6,7 +6,7 @@
  */
 
 import { execSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { type AgentEntry, type AgentsJson, NO_WORKTREE_ROLES } from "./shared/agent-types.ts";
@@ -49,20 +49,36 @@ interface McpConfigJson {
   mcpServers: Record<string, McpServerEntry>;
 }
 
-interface ToolDefinition {
-  name: string;
-  description: string;
-  command: string;
-  args: string[];
-  env: Record<string, string>;
-  requiredEnv: string[];
-}
+// ---------------------------------------------------------------------------
+// Inline tool definitions (replaces config/tools/*.json)
+// ---------------------------------------------------------------------------
 
-interface ToolProfile {
-  role: string;
-  description?: string;
-  tools: string[];
-}
+const TOOL_DEFS: Record<
+  string,
+  { command: string; args: string[]; env: Record<string, string>; requiredEnv: string[] }
+> = {
+  context7: { command: "npx", args: ["-y", "@upwindio/context7-mcp@latest"], env: {}, requiredEnv: [] },
+  fetch: { command: "uvx", args: ["mcp-server-fetch"], env: {}, requiredEnv: [] },
+  github: { command: "npx", args: ["-y", "@anthropic/mcp-server-github"], env: { GITHUB_TOKEN: "${GITHUB_TOKEN}" }, requiredEnv: ["GITHUB_TOKEN"] },
+  puppeteer: { command: "npx", args: ["-y", "@anthropic/mcp-server-puppeteer"], env: {}, requiredEnv: [] },
+  "web-search": { command: "npx", args: ["-y", "@anthropic/mcp-server-brave-search"], env: { BRAVE_API_KEY: "${BRAVE_API_KEY}" }, requiredEnv: ["BRAVE_API_KEY"] },
+};
+
+// ---------------------------------------------------------------------------
+// Role → tool assignments (replaces config/tool-profiles/*.json)
+// ---------------------------------------------------------------------------
+
+const ROLE_TOOLS: Record<string, string[]> = {
+  _base: ["context7", "fetch", "github"],
+  architect: ["context7", "fetch", "web-search", "github"],
+  devops: ["context7", "fetch", "github"],
+  engineer: ["context7", "fetch", "puppeteer", "github"],
+  manager: ["fetch"],
+  product: ["fetch", "web-search"],
+  qa: ["context7", "fetch", "puppeteer", "github"],
+  reviewer: ["context7", "fetch", "web-search", "github"],
+  writer: ["context7", "fetch", "github"],
+};
 
 export interface ToolOverride {
   mode: "add" | "remove" | "replace";
@@ -392,55 +408,6 @@ export function writeJson(filePath: string, data: unknown): void {
   writeFileSync(filePath, `${JSON.stringify(data, null, 2)}\n`, "utf-8");
 }
 
-export function loadToolDefinitions(toolsDir: string): Map<string, ToolDefinition> {
-  const defs = new Map<string, ToolDefinition>();
-  if (!existsSync(toolsDir)) return defs;
-
-  const files = readdirSync(toolsDir).filter((f) => f.endsWith(".json"));
-  for (const file of files) {
-    try {
-      const raw = readFileSync(join(toolsDir, file), "utf-8");
-      const def = JSON.parse(raw) as ToolDefinition;
-      if (!def.name || !def.command || !Array.isArray(def.args)) {
-        console.warn(`  WARN  Skipping malformed tool definition: ${file}`);
-        continue;
-      }
-      defs.set(def.name, def);
-    } catch (err) {
-      console.warn(`  WARN  Failed to parse tool definition ${file}: ${err}`);
-    }
-  }
-  return defs;
-}
-
-export function loadToolProfile(profilesDir: string, role: string): ToolProfile {
-  // Try role-specific profile first
-  const rolePath = join(profilesDir, `${role}.json`);
-  if (existsSync(rolePath)) {
-    try {
-      const raw = readFileSync(rolePath, "utf-8");
-      return JSON.parse(raw) as ToolProfile;
-    } catch (err) {
-      console.warn(`  WARN  Failed to parse tool profile for role '${role}': ${err}`);
-    }
-  }
-
-  // Fall back to _base.json
-  const defaultPath = join(profilesDir, "_base.json");
-  if (existsSync(defaultPath)) {
-    try {
-      const raw = readFileSync(defaultPath, "utf-8");
-      const profile = JSON.parse(raw) as ToolProfile;
-      console.warn(`  WARN  No tool profile for role '${role}' — using _base`);
-      return profile;
-    } catch (err) {
-      console.warn(`  WARN  Failed to parse _base tool profile: ${err}`);
-    }
-  }
-
-  // No profiles at all — discord only
-  return { role, tools: [] };
-}
 
 export function loadSecrets(secretsPath: string): Record<string, string> {
   const secrets: Record<string, string> = {};
@@ -475,34 +442,22 @@ export function interpolateEnv(
 export function resolveToolsForRole(
   role: string,
   agentName: string,
-  toolDefs: Map<string, ToolDefinition>,
-  profilesDir: string,
   secrets: Record<string, string>,
   toolOverrides: Map<string, ToolOverride>,
 ): Record<string, McpServerEntry> {
-  const profile = loadToolProfile(profilesDir, role);
-  let toolNames = [...profile.tools];
+  let toolNames = [...(ROLE_TOOLS[role] ?? ROLE_TOOLS._base)];
 
   // Apply overrides if present
   const override = toolOverrides.get(agentName);
   if (override) {
     switch (override.mode) {
       case "replace":
-        console.log(
-          `  TOOLS  Agent ${agentName}: replacing role '${role}' tools [${toolNames.join(", ")}] with [${override.tools.join(", ")}]`,
-        );
         toolNames = [...override.tools];
         break;
       case "add":
-        console.log(
-          `  TOOLS  Agent ${agentName}: adding [${override.tools.join(", ")}] to role '${role}' tools [${toolNames.join(", ")}]`,
-        );
         toolNames = [...toolNames, ...override.tools.filter((t) => !toolNames.includes(t))];
         break;
       case "remove":
-        console.log(
-          `  TOOLS  Agent ${agentName}: removing [${override.tools.join(", ")}] from role '${role}' tools [${toolNames.join(", ")}]`,
-        );
         toolNames = toolNames.filter((t) => !override.tools.includes(t));
         break;
     }
@@ -511,24 +466,21 @@ export function resolveToolsForRole(
   const result: Record<string, McpServerEntry> = {};
 
   for (const toolName of toolNames) {
-    const def = toolDefs.get(toolName);
+    const def = TOOL_DEFS[toolName];
     if (!def) {
-      console.warn(
-        `  WARN  Tool '${toolName}' referenced by role '${role}' not found in config/tools/ — skipping`,
-      );
+      console.warn(`  WARN  Unknown tool '${toolName}' for role '${role}' — skipping`);
       continue;
     }
 
-    // Check required env vars
     const resolvedEnv = interpolateEnv(def.env, secrets);
-    const missingEnv = def.requiredEnv.filter((varName) => {
+    const missingEnv = def.requiredEnv.filter((varName: string) => {
       const val = secrets[varName] ?? process.env[varName];
       return !val;
     });
 
     if (missingEnv.length > 0) {
       console.warn(
-        `  WARN  Tool '${toolName}' skipped for agent '${agentName}': missing required env vars: ${missingEnv.join(", ")}`,
+        `  WARN  Tool '${toolName}' skipped for agent '${agentName}': missing env vars: ${missingEnv.join(", ")}`,
       );
       continue;
     }
@@ -755,18 +707,8 @@ function generateSingleBot(args: Args): void {
   // Load tool definitions and secrets
   // -------------------------------------------------------------------------
 
-  const toolsDir = join(HIVE_ROOT, "config", "tools");
-  const profilesDir = join(HIVE_ROOT, "config", "tool-profiles");
   const secretsPath = join(HIVE_ROOT, "config", "secrets.env");
-
-  const toolDefs = loadToolDefinitions(toolsDir);
   const secrets = loadSecrets(secretsPath);
-
-  if (toolDefs.size > 0) {
-    console.log(
-      `  TOOLS  Loaded ${toolDefs.size} tool definition(s): ${[...toolDefs.keys()].join(", ")}`,
-    );
-  }
 
   // -------------------------------------------------------------------------
   // Build gateway worker list
@@ -825,8 +767,6 @@ function generateSingleBot(args: Args): void {
     const roleTools = resolveToolsForRole(
       agentRole,
       name,
-      toolDefs,
-      profilesDir,
       secrets,
       args.toolOverrides,
     );

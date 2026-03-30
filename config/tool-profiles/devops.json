@@ -1,5 +1,0 @@
-{
-  "role": "devops",
-  "description": "DevOps — docs, HTTP, and GitHub",
-  "tools": ["context7", "fetch", "github"]
-}

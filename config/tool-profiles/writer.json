@@ -1,5 +1,0 @@
-{
-  "role": "writer",
-  "description": "Writer — docs, HTTP, and GitHub",
-  "tools": ["context7", "fetch", "github"]
-}

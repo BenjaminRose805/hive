@@ -1,5 +1,0 @@
-{
-  "role": "manager",
-  "description": "Hive manager — minimal tools, coordinates via Discord",
-  "tools": ["fetch"]
-}

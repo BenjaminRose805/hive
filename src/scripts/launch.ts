@@ -20,7 +20,6 @@ import {
   ensureDir,
   loadGlobalSettings,
   loadSecrets,
-  loadToolDefinitions,
   resolveToolsForRole,
   type ToolOverride,
   writeAgentsJson,
@@ -943,11 +942,8 @@ function generateConfigs(names: string[], roles: Map<string, string>, args: Laun
     }
   }
 
-  // Load tool definitions and secrets
-  const toolsDir = join(configDir, "tools");
-  const profilesDir = join(configDir, "tool-profiles");
+  // Load secrets for tool env var interpolation
   const secretsPath = join(configDir, "secrets.env");
-  const toolDefs = loadToolDefinitions(toolsDir);
   const secrets = loadSecrets(secretsPath);
 
   // Gateway worker list for gateway config
@@ -996,8 +992,6 @@ function generateConfigs(names: string[], roles: Map<string, string>, args: Laun
     const roleTools = resolveToolsForRole(
       role,
       name,
-      toolDefs,
-      profilesDir,
       secrets,
       toolOverrides,
     );
@@ -1166,10 +1160,7 @@ async function launchHive(args: LaunchArgs): Promise<void> {
 
   // Regenerate MCP configs with real per-worker channel IDs
   if (Object.keys(workerChannels).length > 0) {
-    const toolsDir = join(configDir, "tools");
-    const profilesDir = join(configDir, "tool-profiles");
     const secretsPath = join(configDir, "secrets.env");
-    const toolDefs = loadToolDefinitions(toolsDir);
     const secrets = loadSecrets(secretsPath);
     const toolOverrides = new Map<string, ToolOverride>();
 
@@ -1184,8 +1175,6 @@ async function launchHive(args: LaunchArgs): Promise<void> {
       const roleTools = resolveToolsForRole(
         role,
         name,
-        toolDefs,
-        profilesDir,
         secrets,
         toolOverrides,
       );

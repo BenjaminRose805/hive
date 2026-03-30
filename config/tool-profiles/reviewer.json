@@ -1,5 +1,0 @@
-{
-  "role": "reviewer",
-  "description": "Reviewer — docs, HTTP, web search, and GitHub",
-  "tools": ["context7", "fetch", "web-search", "github"]
-}

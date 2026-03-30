@@ -1,5 +1,0 @@
-{
-  "role": "architect",
-  "description": "Architect — docs, HTTP, web search, and GitHub",
-  "tools": ["context7", "fetch", "web-search", "github"]
-}

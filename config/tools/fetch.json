@@ -1,8 +1,0 @@
-{
-  "name": "fetch",
-  "description": "HTTP fetch for APIs, documentation, and web resources",
-  "command": "uvx",
-  "args": ["mcp-server-fetch"],
-  "env": {},
-  "requiredEnv": []
-}
