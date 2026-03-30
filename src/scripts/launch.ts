@@ -439,14 +439,6 @@ function composeSystemPrompt(
     prompt += `\n\n${sub(readFileSync(rolePath, "utf8"))}`;
   }
 
-  // Domain prompt (from config/prompts/domains/)
-  if (domain) {
-    const domainPath = join(configDir, `prompts/domains/${domain}.md`);
-    if (existsSync(domainPath)) {
-      prompt += `\n\n${sub(readFileSync(domainPath, "utf8"))}`;
-    }
-  }
-
   // Team roster (so every agent knows who's on the team)
   if (team && team.length > 0) {
     prompt += `\n\n${buildTeamRoster(name, team)}`;
