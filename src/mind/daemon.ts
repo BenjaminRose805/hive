@@ -3,11 +3,11 @@
  *
  * Long-running Bun process that:
  *   - Watches pending/ for delta files and merges them into canonical mind files
- *   - Tracks readers and manages watches with nudge notifications
+ *   - Tracks readers and sends notifications
  *   - Sends inbox notifications on updates
  *   - Takes periodic git snapshots of durable knowledge
  *
- * Single writer for: contracts/, decisions/, readers/, watches/, changelog/
+ * Single writer for: contracts/, decisions/, readers/, changelog/
  * CLI writes to:      pending/, inbox/, agents/
  */
 
@@ -35,7 +35,6 @@ import type {
   ReaderRegistry,
   TaskContract,
   TaskPhase,
-  WatchEntry,
 } from "./mind-types";
 import { TERMINAL_PHASES } from "./mind-types";
 
@@ -48,16 +47,12 @@ const PROJECT_ROOT = resolve(SCRIPT_DIR, "../..");
 const MIND_ROOT = join(PROJECT_ROOT, ".hive", "mind");
 
 const POLL_INTERVAL_MS = 2_000;
-const WATCH_MONITOR_INTERVAL_MS = 60_000;
 const GIT_SNAPSHOT_INTERVAL_MS = 300_000;
 const HEARTBEAT_INTERVAL_MS = 30_000;
 
 const GATEWAY_SOCKET = process.env.HIVE_GATEWAY_SOCKET ?? "/tmp/hive-gateway/gateway.sock";
 const PUSH_TIMEOUT_MS = 5_000;
 
-const NUDGE_COOLDOWN_MS = 15 * 60_000; // 15 minutes
-const WATCH_NUDGE_THRESHOLD_MS = 15 * 60_000;
-const WATCH_ALERT_THRESHOLD_MS = 30 * 60_000;
 
 // ---------------------------------------------------------------------------
 // Filesystem helpers
@@ -94,9 +89,6 @@ function gatewayInboxDir(agent: string): string {
   return join(dirname(GATEWAY_SOCKET), "inbox", "messages", agent);
 }
 
-function _watchesFile(agent: string): string {
-  return join(MIND_ROOT, "watches", `${agent}.json`);
-}
 
 function taskDir(): string {
   return join(MIND_ROOT, "tasks");
@@ -121,14 +113,8 @@ function pidFile(): string {
 /** Reader registries keyed by "{type}s/{topic}" */
 const readerRegistries = new Map<string, ReaderRegistry>();
 
-/** Watch entries keyed by agent name */
-const watchCache = new Map<string, WatchEntry[]>();
-
 /** Per-topic mutex keyed by "{target_type}/{target_topic}" */
 const topicMutexes = new Map<string, Promise<void>>();
-
-/** Last nudge timestamp per topic for rate limiting */
-const nudgeTimestamps = new Map<string, number>();
 
 /** Tracks whether changelog has new entries since last git snapshot */
 let changesSinceSnapshot = false;
@@ -136,7 +122,6 @@ let changesSinceSnapshot = false;
 /** Interval/watcher handles for cleanup */
 let pendingWatcher: FSWatcher | null = null;
 let pollTimer: ReturnType<typeof setInterval> | null = null;
-let watchMonitorTimer: ReturnType<typeof setInterval> | null = null;
 let gitSnapshotTimer: ReturnType<typeof setInterval> | null = null;
 let heartbeatTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -280,33 +265,12 @@ function loadReadersFromDisk(): void {
   }
 }
 
-function loadWatchesFromDisk(): void {
-  const watchesRoot = join(MIND_ROOT, "watches");
-  if (!existsSync(watchesRoot)) return;
-
-  for (const file of readdirSync(watchesRoot)) {
-    if (!file.endsWith(".json")) continue;
-    const agent = file.replace(/\.json$/, "");
-    const watches = readJSONFile<WatchEntry[]>(join(watchesRoot, file));
-    if (watches && Array.isArray(watches)) {
-      watchCache.set(agent, watches);
-    }
-  }
-}
-
 async function flushReaderRegistry(type: string, topic: string): Promise<void> {
   const key = registryKey(type, topic);
   const registry = readerRegistries.get(key);
   if (!registry) return;
   const dir = join(MIND_ROOT, "readers", `${type}s`);
   await atomicWrite(dir, `${topic}.json`, registry);
-}
-
-async function flushWatches(agent: string): Promise<void> {
-  const watches = watchCache.get(agent);
-  if (!watches) return;
-  const dir = join(MIND_ROOT, "watches");
-  await atomicWrite(dir, `${agent}.json`, watches);
 }
 
 // ---------------------------------------------------------------------------
@@ -349,42 +313,6 @@ async function notifyStaleReaders(
 }
 
 // ---------------------------------------------------------------------------
-// Resolve matching watches on publish
-// ---------------------------------------------------------------------------
-
-async function resolveWatchesForTopic(type: string, topic: string): Promise<void> {
-  for (const [agent, watches] of watchCache.entries()) {
-    let changed = false;
-    for (const w of watches) {
-      if (w.status === "waiting" && w.type === type && w.topic === topic) {
-        w.status = "resolved";
-        w.resolved_at = new Date().toISOString();
-        changed = true;
-
-        await writeInboxMessage(agent, {
-          from: "hive-mind",
-          type: "watch-resolved",
-          priority: "response",
-          topic: `${type}s/${topic}`,
-          content: `Watch resolved: ${type} "${topic}" is now available`,
-        });
-        await nudgeWorker(agent, "response");
-        await pushDiscordNotification(
-          agent,
-          `${type}s/${topic}`,
-          0,
-          false,
-          `${type}s/${topic} is now available (watch resolved)`,
-        );
-      }
-    }
-    if (changed) {
-      await flushWatches(agent);
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Delta processing
 // ---------------------------------------------------------------------------
 
@@ -416,7 +344,6 @@ async function processDelta(delta: DeltaFile): Promise<void> {
       }
 
       await notifyStaleReaders(type, topic, version, agent, delta.breaking ?? false);
-      await resolveWatchesForTopic(type, topic);
 
       appendChangelog({
         timestamp: new Date().toISOString(),
@@ -571,45 +498,6 @@ async function processDelta(delta: DeltaFile): Promise<void> {
       }
 
       await flushReaderRegistry(type, topic);
-      break;
-    }
-
-    case "register-watch": {
-      if (!delta.watch) break;
-
-      const watches = watchCache.get(agent) ?? [];
-
-      // Check if already watching this topic
-      const existingIdx = watches.findIndex(
-        (w) => w.topic === delta.watch?.topic && w.type === delta.watch?.type,
-      );
-      if (existingIdx >= 0) {
-        watches[existingIdx] = delta.watch;
-      } else {
-        watches.push(delta.watch);
-      }
-      watchCache.set(agent, watches);
-      await flushWatches(agent);
-
-      // Check if canonical file already exists — resolve immediately
-      const cPath = canonicalPath(type, topic);
-      if (existsSync(cPath)) {
-        const entry = readJSONFile<MindEntry>(cPath);
-        if (entry && !entry.retracted) {
-          delta.watch.status = "resolved";
-          delta.watch.resolved_at = new Date().toISOString();
-          await flushWatches(agent);
-
-          await writeInboxMessage(agent, {
-            from: "hive-mind",
-            type: "watch-resolved",
-            priority: "response",
-            topic: `${type}s/${topic}`,
-            content: `Watch resolved: ${type} "${topic}" already exists (v${entry.version})`,
-          });
-          await nudgeWorker(agent, "response");
-        }
-      }
       break;
     }
 
@@ -786,128 +674,6 @@ function resolveManagerName(): string {
 }
 
 // ---------------------------------------------------------------------------
-// Watch monitor
-// ---------------------------------------------------------------------------
-
-async function runWatchMonitor(): Promise<void> {
-  const now = Date.now();
-
-  // Track how many workers are waiting per topic for systemic block detection
-  const waitingPerTopic = new Map<string, string[]>();
-
-  for (const [agent, watches] of watchCache.entries()) {
-    for (const w of watches) {
-      if (w.status !== "waiting") continue;
-
-      const topicKey = `${w.type}s/${w.topic}`;
-
-      // Check if canonical file now exists
-      const cPath = canonicalPath(w.type, w.topic);
-      if (existsSync(cPath)) {
-        const entry = readJSONFile<MindEntry>(cPath);
-        if (entry && !entry.retracted) {
-          w.status = "resolved";
-          w.resolved_at = new Date().toISOString();
-          await flushWatches(agent);
-
-          await writeInboxMessage(agent, {
-            from: "hive-mind",
-            type: "watch-resolved",
-            priority: "response",
-            topic: topicKey,
-            content: `Watch resolved: ${w.type} "${w.topic}" is now available (v${entry.version})`,
-          });
-          await nudgeWorker(agent, "response");
-          await pushDiscordNotification(
-            agent,
-            topicKey,
-            entry.version,
-            false,
-            `${topicKey} is now available (watch resolved)`,
-          );
-          continue;
-        }
-      }
-
-      const waitMs = now - new Date(w.since).getTime();
-
-      // Track for systemic block detection
-      if (!waitingPerTopic.has(topicKey)) {
-        waitingPerTopic.set(topicKey, []);
-      }
-      waitingPerTopic.get(topicKey)?.push(agent);
-
-      // Nudge after 15 minutes
-      if (waitMs > WATCH_NUDGE_THRESHOLD_MS) {
-        const lastNudge = nudgeTimestamps.get(topicKey) ?? 0;
-        if (now - lastNudge < NUDGE_COOLDOWN_MS) continue; // Rate limited
-
-        nudgeTimestamps.set(topicKey, now);
-
-        if (w.expect_from) {
-          await writeInboxMessage(w.expect_from, {
-            from: "hive-mind",
-            type: "nudge",
-            priority: "alert",
-            topic: topicKey,
-            content: `${agent} is waiting on your ${w.type} "${w.topic}" — please publish when ready`,
-          });
-          await nudgeWorker(w.expect_from, "alert");
-        } else {
-          await writeInboxMessage(resolveManagerName(), {
-            from: "hive-mind",
-            type: "nudge",
-            priority: "alert",
-            topic: topicKey,
-            content: `${agent} is waiting on ${w.type} "${w.topic}" but no expected publisher specified — please advise`,
-          });
-          await nudgeWorker(resolveManagerName(), "alert");
-        }
-      }
-    }
-  }
-
-  // Systemic block detection: 2+ workers waiting >30 min on same topic
-  for (const [topicKey, agents] of waitingPerTopic.entries()) {
-    if (agents.length < 2) continue;
-
-    // Check if all have been waiting >30 min
-    let allLong = true;
-    for (const agent of agents) {
-      const watches = watchCache.get(agent) ?? [];
-      const w = watches.find((w) => w.status === "waiting" && `${w.type}s/${w.topic}` === topicKey);
-      if (!w || Date.now() - new Date(w.since).getTime() < WATCH_ALERT_THRESHOLD_MS) {
-        allLong = false;
-        break;
-      }
-    }
-
-    if (allLong) {
-      const lastNudge = nudgeTimestamps.get(`alert:${topicKey}`) ?? 0;
-      if (Date.now() - lastNudge < NUDGE_COOLDOWN_MS) continue;
-
-      nudgeTimestamps.set(`alert:${topicKey}`, Date.now());
-
-      await writeInboxMessage(resolveManagerName(), {
-        from: "hive-mind",
-        type: "nudge",
-        priority: "critical",
-        topic: topicKey,
-        content: `SYSTEMIC BLOCK: ${agents.length} workers (${agents.join(", ")}) waiting on ${topicKey} for 30+ min — possible decomposition issue`,
-      });
-      await nudgeWorker(resolveManagerName(), "critical");
-      await pushDiscordNotification(
-        resolveManagerName(),
-        topicKey,
-        0,
-        true,
-        `Systemic block: ${agents.length} agents waiting on ${topicKey} for >30m`,
-      );
-    }
-  }
-}
-
-// ---------------------------------------------------------------------------
 // Git snapshot
 // ---------------------------------------------------------------------------
 
@@ -1012,7 +778,6 @@ function ensureMindDirs(): void {
     join(MIND_ROOT, "readers"),
     join(MIND_ROOT, "readers", "contracts"),
     join(MIND_ROOT, "readers", "decisions"),
-    join(MIND_ROOT, "watches"),
     join(MIND_ROOT, "changelog"),
   ];
   for (const d of dirs) {
@@ -1036,11 +801,9 @@ async function startup(): Promise<void> {
 
   // Load in-memory state from disk
   loadReadersFromDisk();
-  loadWatchesFromDisk();
 
   const readerCount = readerRegistries.size;
-  const watchCount = Array.from(watchCache.values()).reduce((n, ws) => n + ws.length, 0);
-  console.log(`[hive-mind-daemon] Loaded ${readerCount} reader registries, ${watchCount} watches`);
+  console.log(`[hive-mind-daemon] Loaded ${readerCount} reader registries`);
 
   // Crash recovery: process any existing pending deltas
   await processAllPending();
@@ -1072,15 +835,6 @@ async function startup(): Promise<void> {
       });
     }
   }, POLL_INTERVAL_MS);
-
-  // Watch monitor
-  watchMonitorTimer = setInterval(() => {
-    if (!shuttingDown) {
-      runWatchMonitor().catch((err) => {
-        process.stderr.write(`[hive-mind-daemon] Watch monitor error: ${(err as Error).message}\n`);
-      });
-    }
-  }, WATCH_MONITOR_INTERVAL_MS);
 
   // Git snapshot
   gitSnapshotTimer = setInterval(() => {
@@ -1117,10 +871,6 @@ async function shutdown(): Promise<void> {
   if (pollTimer) {
     clearInterval(pollTimer);
     pollTimer = null;
-  }
-  if (watchMonitorTimer) {
-    clearInterval(watchMonitorTimer);
-    watchMonitorTimer = null;
   }
   if (gitSnapshotTimer) {
     clearInterval(gitSnapshotTimer);

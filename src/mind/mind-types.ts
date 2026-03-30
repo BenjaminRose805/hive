@@ -55,26 +55,10 @@ export interface InboxMessage {
 }
 
 // ---------------------------------------------------------------------------
-// Watch Entries (stored in watches/{agent}.json)
-// ---------------------------------------------------------------------------
-
-export type WatchStatus = "waiting" | "resolved";
-
-export interface WatchEntry {
-  topic: string;
-  type: string; // "contract" | "decision"
-  status: WatchStatus;
-  since: string; // ISO-8601
-  default_action: string;
-  expect_from?: string;
-  resolved_at?: string;
-}
-
-// ---------------------------------------------------------------------------
 // Delta Files (written to pending/)
 // ---------------------------------------------------------------------------
 
-export type DeltaAction = "publish" | "update" | "retract" | "register-reader" | "register-watch" | "task-create" | "task-transition";
+export type DeltaAction = "publish" | "update" | "retract" | "register-reader" | "task-create" | "task-transition";
 
 export interface DeltaFile {
   agent: string;
@@ -89,8 +73,6 @@ export interface DeltaFile {
   reader?: {
     read_version: number;
   };
-  // For register-watch
-  watch?: WatchEntry;
 }
 
 // ---------------------------------------------------------------------------

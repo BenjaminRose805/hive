@@ -6,8 +6,6 @@
  *   publish      --type contract|decision --topic <name> --agent <name> --data '<json>' [--breaking] [--tags t1,t2]
  *   read         --type contract|decision --topic <name> --agent <name>
  *   list         --type contracts|decisions [--author <name>]
- *   watch        --topic <name> --type contract|decision --agent <name> --default <string> [--expect-from <agent>]
- *   check-watches --agent <name>
  *   load         --agent <name>
  *   save         --agent <name> --type context|preferences|history --data '<json>'
  *   clear        --agent <name> [--type <type>]
@@ -16,7 +14,7 @@
 
 import { existsSync, readdirSync, unlinkSync } from "node:fs";
 import { join, resolve } from "node:path";
-import type { CliError, DeltaFile, MindEntry, WatchEntry } from "../src/mind/mind-types";
+import type { CliError, DeltaFile, MindEntry } from "../src/mind/mind-types";
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -126,10 +124,6 @@ function agentDir(agent: string): string {
   return join(MIND_ROOT, "agents", agent);
 }
 
-function watchesFile(agent: string): string {
-  return join(MIND_ROOT, "watches", `${agent}.json`);
-}
-
 // ---------------------------------------------------------------------------
 // Argument parsing
 // ---------------------------------------------------------------------------
@@ -142,8 +136,6 @@ interface ParsedArgs {
   data?: string;
   breaking?: boolean;
   tags?: string[];
-  expectFrom?: string;
-  default?: string;
   to?: string;
   from?: string;
   markRead?: boolean;
@@ -179,12 +171,6 @@ function parseArgs(argv: string[]): ParsedArgs {
           .split(",")
           .map((t) => t.trim())
           .filter(Boolean);
-        break;
-      case "--expect-from":
-        result.expectFrom = args[++i];
-        break;
-      case "--default":
-        result.default = args[++i];
         break;
       case "--to":
         result.to = args[++i];
@@ -331,60 +317,6 @@ function cmdList(args: ParsedArgs): void {
   console.log("");
 }
 
-/** watch — write register-watch delta to pending/ */
-async function cmdWatch(args: ParsedArgs): Promise<void> {
-  const agent = validateAgent(args.agent);
-  const type = validateEntryType(args.type);
-  const topic = validateTopic(args.topic);
-  const defaultAction = args.default;
-  if (!defaultAction) cliError("missing_default", 1, "--default <string> is required");
-
-  const watch: WatchEntry = {
-    topic,
-    type,
-    status: "waiting",
-    since: new Date().toISOString(),
-    default_action: defaultAction,
-    ...(args.expectFrom ? { expect_from: args.expectFrom } : {}),
-  };
-
-  const delta: DeltaFile = {
-    agent,
-    action: "register-watch",
-    target_type: type,
-    target_topic: topic,
-    watch,
-  };
-
-  const filename = `${Date.now()}-${agent}-register-watch.json`;
-  await atomicWrite(pendingDir(), filename, delta);
-
-  console.log(JSON.stringify({ status: "watch_queued", topic }));
-}
-
-/** check-watches — read-only: read watches/{agent}.json */
-function cmdCheckWatches(args: ParsedArgs): void {
-  const agent = validateAgent(args.agent);
-  const file = watchesFile(agent);
-  const watches = readJSONFile(file) as WatchEntry[] | null;
-
-  if (!watches || watches.length === 0) {
-    console.log(`No watches found for agent "${agent}"`);
-    return;
-  }
-
-  console.log(`\nWatches for ${agent} (${watches.length}):\n`);
-  for (const w of watches) {
-    const status = w.status === "waiting" ? "[WAITING]" : "[RESOLVED]";
-    const since = timeSince(w.since);
-    const expectLine = w.expect_from ? ` (expect from: ${w.expect_from})` : "";
-    const resolvedLine = w.resolved_at ? ` resolved ${timeSince(w.resolved_at)}` : "";
-    console.log(`  ${status} ${w.type}/${w.topic} — since ${since}${expectLine}${resolvedLine}`);
-    console.log(`    Default action: ${w.default_action}`);
-  }
-  console.log("");
-}
-
 /** load — generate system prompt section */
 function cmdLoad(args: ParsedArgs): void {
   const agent = validateAgent(args.agent);
@@ -501,26 +433,6 @@ function cmdLoad(args: ParsedArgs): void {
   }
 
   // --- Hive Mind sections ---
-
-  // Active watches
-  lines.push("## Active Watches");
-  const wFile = watchesFile(agent);
-  const watches = readJSONFile(wFile) as WatchEntry[] | null;
-  if (watches && watches.length > 0) {
-    const waiting = watches.filter((w) => w.status === "waiting");
-    if (waiting.length > 0) {
-      for (const w of waiting) {
-        const expectLine = w.expect_from ? ` (expecting from: ${w.expect_from})` : "";
-        lines.push(`- WAITING: ${w.type}/${w.topic} since ${timeSince(w.since)}${expectLine}`);
-        lines.push(`  Default action: ${w.default_action}`);
-      }
-    } else {
-      lines.push("(no active watches)");
-    }
-  } else {
-    lines.push("(no active watches)");
-  }
-  lines.push("");
 
   // Recently published by this agent
   lines.push("## Your Published Items");
@@ -669,20 +581,6 @@ function cmdView(args: ParsedArgs): void {
   }
   console.log("");
 
-  // Watches
-  console.log("--- Watches ---");
-  const wFile = watchesFile(agent);
-  const watches = readJSONFile(wFile) as WatchEntry[] | null;
-  if (watches && watches.length > 0) {
-    for (const w of watches) {
-      const status = w.status === "waiting" ? "[WAITING]" : "[RESOLVED]";
-      console.log(`  ${status} ${w.type}/${w.topic} — default: ${w.default_action}`);
-    }
-  } else {
-    console.log("  (no watches)");
-  }
-  console.log("");
-
   // Published items
   console.log("--- Published Items ---");
   let hasItems = false;
@@ -722,12 +620,6 @@ async function main(): Promise<void> {
     case "list":
       cmdList(args);
       break;
-    case "watch":
-      await cmdWatch(args);
-      break;
-    case "check-watches":
-      cmdCheckWatches(args);
-      break;
     case "load":
       cmdLoad(args);
       break;
@@ -751,8 +643,6 @@ Commands:
   publish       --type contract|decision --topic <name> --agent <name> --data '<json>' [--breaking] [--tags t1,t2]
   read          --type contract|decision --topic <name> --agent <name>
   list          --type contracts|decisions [--author <name>]
-  watch         --topic <name> --type contract|decision --agent <name> --default <string> [--expect-from <agent>]
-  check-watches --agent <name>
   load          --agent <name>
   save          --agent <name> --type context|preferences|history --data '<json>'
   clear         --agent <name> [--type <type>]
