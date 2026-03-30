@@ -95,7 +95,6 @@ interface GatewayConfigJson {
 // ---------------------------------------------------------------------------
 
 const HIVE_ROOT = resolve(import.meta.dir, "..");
-const DISCORD_RELAY_PATH = join(HIVE_ROOT, "src/mcp/discord-relay.ts");
 const INBOX_RELAY_PATH = join(HIVE_ROOT, "src/mcp/inbox-relay.ts");
 
 // ---------------------------------------------------------------------------
@@ -595,13 +594,13 @@ export function buildRelayMcpConfig(
   _stateDir: string,
   workerId: string,
   _workerSocketPath: string,
-  channelId: string,
+  _channelId: string,
   _mentionPatterns: string,
   _requireMention: boolean,
   roleTools?: Record<string, McpServerEntry>,
   gatewaySocket?: string,
   globalMcpServers?: Record<string, McpServerEntry>,
-  agentRole?: string,
+  _agentRole?: string,
 ): McpConfigJson {
   const gw = gatewaySocket ?? process.env.HIVE_GATEWAY_SOCKET ?? "/tmp/hive-gateway/gateway.sock";
   const projectRoot = process.env.HIVE_PROJECT_DIR ?? process.cwd();
@@ -623,19 +622,6 @@ export function buildRelayMcpConfig(
     },
     ...(roleTools ?? {}),
   };
-
-  // AC8: Discord relay is Oracle-only (product role)
-  if (agentRole === "product") {
-    servers.discord = {
-      command: "bun",
-      args: ["run", DISCORD_RELAY_PATH],
-      env: {
-        HIVE_GATEWAY_SOCKET: gw,
-        HIVE_WORKER_ID: workerId,
-        HIVE_CHANNEL_ID: channelId,
-      },
-    };
-  }
 
   return { mcpServers: servers };
 }
